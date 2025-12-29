@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Logic Linker - 诊断页面</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f7;
+        }
+        .status {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            margin: 20px 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .success { color: #34c759; }
+        .error { color: #ff3b30; }
+        .info { color: #007aff; }
+        button {
+            background: #007aff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover { background: #0051d5; }
+        pre {
+            background: #f5f5f7;
+            padding: 15px;
+            border-radius: 8px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Logic Linker - 诊断页面</h1>
+    
+    <div class="status">
+        <h2>服务器状态检查</h2>
+        <p id="server-status">检查中...</p>
+        <button onclick="checkServer()">重新检查</button>
+    </div>
+    
+    <div class="status">
+        <h2>API 端点测试</h2>
+        <p id="api-status">检查中...</p>
+        <button onclick="testAPI()">测试 API</button>
+    </div>
+    
+    <div class="status">
+        <h2>静态资源检查</h2>
+        <ul id="static-resources"></ul>
+    </div>
+    
+    <div class="status">
+        <h2>浏览器信息</h2>
+        <pre id="browser-info"></pre>
+    </div>
+    
+    <div class="status">
+        <h2>操作</h2>
+        <button onclick="window.location.href='/'">返回主页</button>
+        <button onclick="window.location.reload()">刷新页面</button>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8003';
+        
+        // 显示浏览器信息
+        document.getElementById('browser-info').textContent = JSON.stringify({
+            userAgent: navigator.userAgent,
+            url: window.location.href,
+            protocol: window.location.protocol,
+            host: window.location.host,
+            port: window.location.port
+        }, null, 2);
+        
+        // 检查服务器
+        async function checkServer() {
+            const statusEl = document.getElementById('server-status');
+            statusEl.innerHTML = '检查中...';
+            
+            try {
+                const response = await fetch(API_BASE + '/');
+                if (response.ok) {
+                    statusEl.innerHTML = '<span class="success">✓ 服务器正常运行 (HTTP ' + response.status + ')</span>';
+                } else {
+                    statusEl.innerHTML = '<span class="error">✗ 服务器响应异常 (HTTP ' + response.status + ')</span>';
+                }
+            } catch (error) {
+                statusEl.innerHTML = '<span class="error">✗ 无法连接到服务器: ' + error.message + '</span>';
+            }
+        }
+        
+        // 测试 API
+        async function testAPI() {
+            const statusEl = document.getElementById('api-status');
+            statusEl.innerHTML = '测试中...';
+            
+            try {
+                const response = await fetch(API_BASE + '/api/analyze', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ urls: [], texts: [] })
+                });
+                
+                const data = await response.json();
+                if (response.status === 400 && data.detail) {
+                    statusEl.innerHTML = '<span class="success">✓ API 端点正常 (返回预期错误: ' + data.detail + ')</span>';
+                } else {
+                    statusEl.innerHTML = '<span class="info">API 响应: ' + JSON.stringify(data, null, 2) + '</span>';
+                }
+            } catch (error) {
+                statusEl.innerHTML = '<span class="error">✗ API 测试失败: ' + error.message + '</span>';
+            }
+        }
+        
+        // 检查静态资源
+        async function checkStaticResources() {
+            const resources = ['/static/style.css', '/static/script.js', '/static/index.html'];
+            const listEl = document.getElementById('static-resources');
+            listEl.innerHTML = '';
+            
+            for (const resource of resources) {
+                const li = document.createElement('li');
+                try {
+                    const response = await fetch(API_BASE + resource);
+                    if (response.ok) {
+                        li.innerHTML = '<span class="success">✓</span> ' + resource + ' (HTTP ' + response.status + ')';
+                    } else {
+                        li.innerHTML = '<span class="error">✗</span> ' + resource + ' (HTTP ' + response.status + ')';
+                    }
+                } catch (error) {
+                    li.innerHTML = '<span class="error">✗</span> ' + resource + ' (错误: ' + error.message + ')';
+                }
+                listEl.appendChild(li);
+            }
+        }
+        
+        // 页面加载时自动检查
+        window.addEventListener('load', () => {
+            checkServer();
+            checkStaticResources();
+        });
+    </script>
+</body>
+</html>
+
