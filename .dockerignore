@@ -1,0 +1,59 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+.venv
+venv
+env
+
+# Node
+node_modules
+npm-debug.log
+.next
+dist
+build
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# 日志
+*.log
+logs/
+
+# 文档
+*.md
+!README.md
+
+# 测试
+test_*.py
+*_test.py
+tests/
+
+# 部署相关
+docker-compose.yml
+Dockerfile
+.dockerignore
+deploy.sh
+
+# 其他
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+

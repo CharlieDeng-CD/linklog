@@ -1,5 +1,5 @@
 """
-Logic Linker - 后端服务器
+LinkLog - 后端服务器
 提供多源课程解析、知识图谱生成等 API
 """
 import os
@@ -13,15 +13,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from openai import OpenAI
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
+import asyncio
 
 # 加载环境变量
 env_path = Path(__file__).parent.parent / '.env'
 load_dotenv(env_path)
 
-app = FastAPI(title="Logic Linker API")
+# 版本信息
+VERSION = os.getenv("VERSION", "v2.0.0")
+PORT = int(os.getenv("PORT", "8003"))
+
+app = FastAPI(
+    title="LinkLog API",
+    version=VERSION,
+    description="渐进式知识图谱生成器 API"
+)
 
 # 启用 CORS
 app.add_middleware(
@@ -32,11 +41,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 初始化 OpenAI 客户端
+# 初始化 OpenAI 异步客户端（支持并发请求）
 # 优先从环境变量读取，如果没有则使用默认密钥（仅用于开发）
 api_key = os.getenv("AI_BUILDER_TOKEN") or "sk_a5bebbc1_a57c871039be5845359613b5c8d9856cce87"
 
-client = OpenAI(
+client = AsyncOpenAI(
     base_url="https://space.ai-builders.com/backend/v1",
     api_key=api_key
 )
@@ -45,15 +54,31 @@ print(f"✓ OpenAI 客户端已初始化")
 print(f"  Base URL: https://space.ai-builders.com/backend/v1")
 print(f"  API Key: {api_key[:20]}...")
 
-# 静态文件目录
+# 静态文件目录（v1 版本）
 static_dir = Path(__file__).parent / "static"
 
+# Next.js 构建目录（v2 版本 - 静态导出）
+frontend_out_dir = Path(__file__).parent / "frontend" / "out"
+frontend_public_dir = Path(__file__).parent / "frontend" / "public"
+
 # 挂载静态文件（必须在路由之前）
+# 优先挂载 Next.js 构建产物（v2 - 静态导出）
+if frontend_out_dir.exists():
+    # 挂载 Next.js 静态导出目录
+    app.mount("/_next", StaticFiles(directory=str(frontend_out_dir / "_next")), name="next-static")
+    # 挂载公共资源
+    if frontend_public_dir.exists():
+        app.mount("/public", StaticFiles(directory=str(frontend_public_dir)), name="public")
+    print(f"✓ Next.js 静态文件已挂载")
+    print(f"  - 导出目录: {frontend_out_dir}")
+    print(f"  - 公共目录: {frontend_public_dir}")
+
+# v1 版本的静态文件（向后兼容）
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-    print(f"✓ 静态文件目录已挂载: {static_dir}")
+    print(f"✓ v1 静态文件目录已挂载: {static_dir}")
 else:
-    print(f"⚠ 警告: 静态文件目录不存在: {static_dir}")
+    print(f"⚠ 警告: v1 静态文件目录不存在: {static_dir}")
 
 # ==================== 数据模型 ====================
 
@@ -200,11 +225,18 @@ def build_analysis_prompt(urls: List[str], texts: List[str], all_contents: List[
 
 @app.get("/")
 async def read_root():
-    """返回前端页面"""
+    """返回前端页面（优先返回 Next.js 静态导出）"""
+    # 优先返回 Next.js 静态导出的 index.html
+    next_index_path = frontend_out_dir / "index.html"
+    if next_index_path.exists():
+        return FileResponse(str(next_index_path), media_type="text/html")
+    
+    # 回退到 v1 版本的 index.html
     index_path = static_dir / "index.html"
     if index_path.exists():
         return FileResponse(str(index_path), media_type="text/html")
-    return {"message": "Logic Linker API", "status": "running", "static_dir": str(static_dir)}
+    
+    return {"message": "LinkLog API", "status": "running", "version": VERSION}
 
 
 @app.post("/api/analyze")
@@ -214,7 +246,7 @@ async def analyze_course(request: AnalyzeRequest):
     支持多个 URL 和文本输入
     """
     print("\n" + "="*80)
-    print("🚀 Logic Linker - 开始分析课程")
+    print("🚀 LinkLog - 开始分析课程")
     print("="*80)
     
     all_contents = []
@@ -278,8 +310,8 @@ async def analyze_course(request: AnalyzeRequest):
     print(f"[System] 正在发送请求到 AI API...")
     
     try:
-        # 调用 AI 分析
-        response = client.chat.completions.create(
+        # 调用 AI 分析（异步）
+        response = await client.chat.completions.create(
             model="deepseek",  # 使用经济型模型
             messages=[
                 {
@@ -463,7 +495,7 @@ async def analyze_course_test():
     用于测试前端跳转和渲染功能
     """
     print("\n" + "="*80)
-    print("🧪 Logic Linker - 测试模式（使用固定数据）")
+    print("🧪 LinkLog - 测试模式（使用固定数据）")
     print("="*80)
     
     # 使用之前日志中的实际数据
@@ -518,6 +550,570 @@ async def analyze_course_test():
     }
 
 
+# ==================== v2 API Endpoints ====================
+
+class V2InitRequest(BaseModel):
+    """v2 初始图谱生成请求"""
+    goal: str
+
+class V2ExpandRequest(BaseModel):
+    """v2 节点展开请求"""
+    original_goal: str
+    node_id: str
+    node_label: str
+    node_path: List[str]  # 从根到当前节点的路径
+    node_category: str  # goal/action/prerequisite
+    existing_nodes: List[Dict]  # 已有节点（用于去重）
+
+class V2ContextRequest(BaseModel):
+    """v2 节点上下文请求"""
+    node_id: str
+    node_label: str
+    original_goal: str
+    node_path: List[str]
+
+@app.post("/api/v2/init")
+async def v2_init_graph(request: V2InitRequest):
+    """
+    v2 版本：生成初始图谱（Level 1 节点）
+    根据用户目标生成 3-5 个顶层节点
+    """
+    print("\n" + "="*80)
+    print("🚀 LinkLog v2 - 生成初始图谱")
+    print("="*80)
+    
+    # ========== 1. Agent 动作：接收用户输入 ==========
+    print("\n[Agent] 📥 接收用户目标")
+    print(f"   └─ 目标: {request.goal}")
+    request_json = json.dumps({"goal": request.goal}, ensure_ascii=False, indent=2)
+    print(f"   └─ 请求数据:\n{request_json}")
+    
+    # 构建提示词
+    prompt = f"""你是一位技术导师专家，擅长将复杂的学习目标分解为清晰的依赖图谱。
+
+用户目标：{request.goal}
+
+请生成初始的知识图谱，包含 3-5 个顶层节点（Level 1），这些节点应该是达成目标的核心步骤或主要模块。
+
+**节点分类：**
+- goal: 最终目标或子目标
+- action: 具体的行动步骤
+- prerequisite: 前置知识或必须掌握的技能（这些是用户可能不知道的"未知的未知"）
+
+**重要要求：**
+1. 必须识别出至少 1-2 个 prerequisite 节点（用暖色高亮显示）
+2. 节点描述要结合用户目标，解释"为什么需要这个"
+3. 返回严格的 JSON 格式
+
+**返回格式：**
+{{
+  "nodes": [
+    {{
+      "id": "n1",
+      "label": "节点名称",
+      "category": "goal|action|prerequisite",
+      "description": "一句话描述这个节点"
+    }}
+  ],
+  "edges": [
+    {{
+      "source": "n1",
+      "target": "n2",
+      "reason": "依赖原因"
+    }}
+  ]
+}}"""
+    
+    try:
+        # ========== 2. System 动作：准备 API 调用 ==========
+        print("\n[System] 🔧 准备 AI API 调用")
+        api_params = {
+            "model": "deepseek",
+            "temperature": 0.3,
+            "max_tokens": 1000  # 减少token以加快响应
+        }
+        print(f"   └─ 模型: {api_params['model']}")
+        print(f"   └─ 温度: {api_params['temperature']}")
+        print(f"   └─ 最大Token: {api_params['max_tokens']}")
+        print(f"   └─ Prompt长度: {len(prompt)} 字符")
+        
+        # ========== 3. System 动作：调用 AI（异步）==========
+        print("\n[System] 🤖 调用 AI API（异步）...")
+        import time
+        start_time = time.time()
+        
+        # 打印请求详情
+        print(f"[System] 📤 发送请求:")
+        print(f"   └─ 模型: {api_params['model']}")
+        print(f"   └─ Messages数量: 2")
+        print(f"   └─ System prompt长度: {len('你是一位技术导师专家，擅长识别学习路径中的前置知识和依赖关系。始终返回有效的 JSON 格式。')} 字符")
+        print(f"   └─ User prompt长度: {len(prompt)} 字符")
+        print(f"   └─ max_tokens: {api_params['max_tokens']}")
+        print(f"   └─ temperature: {api_params['temperature']}")
+        
+        response = await client.chat.completions.create(
+            model=api_params["model"],
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是一位技术导师专家，擅长识别学习路径中的前置知识和依赖关系。始终返回有效的 JSON 格式。"
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=api_params["temperature"],
+            max_tokens=api_params["max_tokens"]
+        )
+        
+        elapsed_time = time.time() - start_time
+        
+        # ========== 4. Agent 响应：AI 返回结果 ==========
+        print(f"\n[Agent] ✅ AI 响应完成 (耗时: {elapsed_time:.2f}秒)")
+        
+        # 详细分析响应
+        message = response.choices[0].message
+        print(f"[Agent] 📥 响应详情:")
+        print(f"   └─ Finish reason: {message.finish_reason if hasattr(message, 'finish_reason') else 'N/A'}")
+        
+        # 检查是否有工具调用
+        if hasattr(message, 'tool_calls') and message.tool_calls:
+            print(f"[Agent] 🔧 检测到工具调用！数量: {len(message.tool_calls)}")
+            for i, tool_call in enumerate(message.tool_calls, 1):
+                print(f"   └─ 工具调用 {i}:")
+                print(f"      - ID: {tool_call.id if hasattr(tool_call, 'id') else 'N/A'}")
+                print(f"      - Type: {tool_call.type if hasattr(tool_call, 'type') else 'N/A'}")
+                if hasattr(tool_call, 'function'):
+                    print(f"      - Function: {tool_call.function.name if hasattr(tool_call.function, 'name') else 'N/A'}")
+                    print(f"      - Arguments: {tool_call.function.arguments[:200] if hasattr(tool_call.function, 'arguments') else 'N/A'}...")
+        else:
+            print(f"[Agent] ✅ 无工具调用（纯文本响应）")
+        
+        content = message.content if message.content else ""
+        print(f"   └─ 响应内容长度: {len(content)} 字符")
+        
+        # Token 使用详情
+        if hasattr(response, 'usage'):
+            usage = response.usage
+            print(f"\n[System] 📊 Token 使用详情:")
+            print(f"   └─ Prompt tokens: {usage.prompt_tokens if hasattr(usage, 'prompt_tokens') else 'N/A'}")
+            print(f"   └─ Completion tokens: {usage.completion_tokens if hasattr(usage, 'completion_tokens') else 'N/A'}")
+            print(f"   └─ Total tokens: {usage.total_tokens if hasattr(usage, 'total_tokens') else 'N/A'}")
+            
+            # 分析 token 使用
+            if hasattr(usage, 'total_tokens') and usage.total_tokens > api_params['max_tokens'] * 2:
+                print(f"\n[System] ⚠️ 警告：实际使用 tokens ({usage.total_tokens}) 远超设置的 max_tokens ({api_params['max_tokens']})")
+                print(f"   └─ 可能原因：")
+                print(f"      1. 进行了工具调用（网络搜索等）")
+                print(f"      2. API 端忽略了 max_tokens 限制")
+                print(f"      3. 模型生成了超长响应")
+        else:
+            print(f"   └─ 使用Token: N/A（无 usage 信息）")
+        
+        print(f"   └─ 原始响应预览:\n{content[:300]}...")
+        
+        # ========== 5. System 动作：解析响应 ==========
+        print("\n[System] 🔍 解析 AI 响应")
+        original_content = content
+        
+        # 解析 JSON
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+            print("   └─ 检测到 Markdown JSON 代码块，已提取")
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0].strip()
+            print("   └─ 检测到代码块，已提取")
+        
+        graph_data = json.loads(content)
+        print(f"   └─ JSON 解析成功")
+        
+        # 验证数据结构
+        if "nodes" not in graph_data:
+            graph_data["nodes"] = []
+        if "edges" not in graph_data:
+            graph_data["edges"] = []
+        
+        # ========== 6. System 动作：返回结果 ==========
+        print("\n[System] 📤 返回处理结果")
+        print(f"   └─ 节点数量: {len(graph_data['nodes'])}")
+        print(f"   └─ 边数量: {len(graph_data['edges'])}")
+        print(f"   └─ 节点列表:")
+        for i, node in enumerate(graph_data['nodes'], 1):
+            print(f"      {i}. [{node.get('category', 'unknown')}] {node.get('label', 'N/A')}")
+        
+        response_data = {
+            "success": True,
+            "data": graph_data,
+            "original_goal": request.goal
+        }
+        print(f"\n[System] ✅ 请求处理完成 (总耗时: {elapsed_time:.2f}秒)")
+        print("="*80 + "\n")
+        
+        return response_data
+        
+    except json.JSONDecodeError as e:
+        print(f"\n[System] ❌ JSON 解析错误: {str(e)}")
+        print(f"   └─ 原始内容:\n{original_content[:500]}")
+        raise HTTPException(status_code=500, detail=f"JSON解析失败: {str(e)}")
+    except Exception as e:
+        print(f"\n[System] ❌ 错误: {str(e)}")
+        import traceback
+        print(f"   └─ 错误详情:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"生成初始图谱失败: {str(e)}")
+
+
+@app.post("/api/v2/expand")
+async def v2_expand_node(request: V2ExpandRequest):
+    """
+    v2 版本：展开节点，生成子节点（Level 2+）
+    基于节点上下文生成前置知识子节点
+    """
+    print("\n" + "="*80)
+    print("🚀 LinkLog v2 - 展开节点")
+    print("="*80)
+    
+    # ========== 1. Agent 动作：接收展开请求 ==========
+    print("\n[Agent] 📥 接收节点展开请求")
+    print(f"   └─ 节点ID: {request.node_id}")
+    print(f"   └─ 节点标签: {request.node_label}")
+    print(f"   └─ 节点类型: {request.node_category}")
+    print(f"   └─ 路径: {' → '.join(request.node_path)}")
+    print(f"   └─ 原始目标: {request.original_goal}")
+    print(f"   └─ 已有节点数: {len(request.existing_nodes)}")
+    
+    # 构建上下文
+    existing_labels = [n.get('label', '') for n in request.existing_nodes]
+    context_info = f"""
+原始目标：{request.original_goal}
+当前路径：{' → '.join(request.node_path)}
+要展开的节点：{request.node_label}（类型：{request.node_category}）
+
+已有节点（避免重复）：
+{', '.join(existing_labels[:10])}
+"""
+    
+    prompt = f"""你是一位技术导师专家。用户想要学习"{request.original_goal}"，现在需要展开节点"{request.node_label}"。
+
+{context_info}
+
+请生成这个节点的子节点（前置知识或具体步骤），通常 2-4 个子节点。
+
+**重要要求：**
+1. 子节点的解释必须回溯到原始目标"{request.original_goal}"，说明"在你的目标中，为什么需要学习这个"
+2. 避免生成与已有节点重复的概念
+3. 优先识别 prerequisite 类型的节点（用户可能不知道的知识）
+4. 返回严格的 JSON 格式
+
+**返回格式：**
+{{
+  "nodes": [
+    {{
+      "id": "nX",
+      "label": "子节点名称",
+      "category": "goal|action|prerequisite",
+      "description": "结合原始目标解释为什么需要这个"
+    }}
+  ],
+  "edges": [
+    {{
+      "source": "{request.node_id}",
+      "target": "nX",
+      "reason": "依赖原因"
+    }}
+  ]
+}}"""
+    
+    try:
+        # ========== 2. System 动作：准备 API 调用 ==========
+        print("\n[System] 🔧 准备 AI API 调用")
+        api_params = {
+            "model": "deepseek",
+            "temperature": 0.3,
+            "max_tokens": 800  # 减少token以加快响应
+        }
+        print(f"   └─ 模型: {api_params['model']}")
+        print(f"   └─ 温度: {api_params['temperature']}")
+        print(f"   └─ 最大Token: {api_params['max_tokens']}")
+        print(f"   └─ Prompt长度: {len(prompt)} 字符")
+        
+        # ========== 3. System 动作：调用 AI（异步）==========
+        print("\n[System] 🤖 调用 AI API（异步）...")
+        import time
+        start_time = time.time()
+        
+        # 打印请求详情
+        print(f"[System] 📤 发送请求:")
+        print(f"   └─ 模型: {api_params['model']}")
+        print(f"   └─ max_tokens: {api_params['max_tokens']}")
+        print(f"   └─ User prompt长度: {len(prompt)} 字符")
+        
+        response = await client.chat.completions.create(
+            model=api_params["model"],
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是一位技术导师专家，擅长识别学习路径中的前置知识和依赖关系。始终返回有效的 JSON 格式，确保上下文一致性。"
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=api_params["temperature"],
+            max_tokens=api_params["max_tokens"]
+        )
+        
+        elapsed_time = time.time() - start_time
+        
+        # ========== 4. Agent 响应：AI 返回结果 ==========
+        print(f"\n[Agent] ✅ AI 响应完成 (耗时: {elapsed_time:.2f}秒)")
+        
+        # 详细分析响应
+        message = response.choices[0].message
+        print(f"[Agent] 📥 响应详情:")
+        print(f"   └─ Finish reason: {message.finish_reason if hasattr(message, 'finish_reason') else 'N/A'}")
+        
+        # 检查是否有工具调用
+        if hasattr(message, 'tool_calls') and message.tool_calls:
+            print(f"[Agent] 🔧 检测到工具调用！数量: {len(message.tool_calls)}")
+            for i, tool_call in enumerate(message.tool_calls, 1):
+                print(f"   └─ 工具调用 {i}:")
+                print(f"      - ID: {tool_call.id if hasattr(tool_call, 'id') else 'N/A'}")
+                print(f"      - Type: {tool_call.type if hasattr(tool_call, 'type') else 'N/A'}")
+                if hasattr(tool_call, 'function'):
+                    print(f"      - Function: {tool_call.function.name if hasattr(tool_call.function, 'name') else 'N/A'}")
+                    print(f"      - Arguments: {tool_call.function.arguments[:200] if hasattr(tool_call.function, 'arguments') else 'N/A'}...")
+        else:
+            print(f"[Agent] ✅ 无工具调用（纯文本响应）")
+        
+        content = message.content if message.content else ""
+        print(f"   └─ 响应内容长度: {len(content)} 字符")
+        
+        # Token 使用详情
+        if hasattr(response, 'usage'):
+            usage = response.usage
+            print(f"\n[System] 📊 Token 使用详情:")
+            print(f"   └─ Prompt tokens: {usage.prompt_tokens if hasattr(usage, 'prompt_tokens') else 'N/A'}")
+            print(f"   └─ Completion tokens: {usage.completion_tokens if hasattr(usage, 'completion_tokens') else 'N/A'}")
+            print(f"   └─ Total tokens: {usage.total_tokens if hasattr(usage, 'total_tokens') else 'N/A'}")
+            
+            # 分析 token 使用
+            if hasattr(usage, 'total_tokens') and usage.total_tokens > api_params['max_tokens'] * 2:
+                print(f"\n[System] ⚠️ 警告：实际使用 tokens ({usage.total_tokens}) 远超设置的 max_tokens ({api_params['max_tokens']})")
+                print(f"   └─ 可能原因：")
+                print(f"      1. 进行了工具调用（网络搜索等）")
+                print(f"      2. API 端忽略了 max_tokens 限制")
+                print(f"      3. 模型生成了超长响应")
+        else:
+            print(f"   └─ 使用Token: N/A（无 usage 信息）")
+        
+        print(f"   └─ 原始响应预览:\n{content[:300]}...")
+        
+        # ========== 5. System 动作：解析响应 ==========
+        print("\n[System] 🔍 解析 AI 响应")
+        original_content = content
+        
+        # 解析 JSON
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+            print("   └─ 检测到 Markdown JSON 代码块，已提取")
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0].strip()
+            print("   └─ 检测到代码块，已提取")
+        
+        graph_data = json.loads(content)
+        print(f"   └─ JSON 解析成功")
+        
+        # ========== 6. System 动作：节点去重 ==========
+        print("\n[System] 🔄 执行节点去重")
+        existing_labels_set = set(existing_labels)
+        before_count = len(graph_data.get("nodes", []))
+        filtered_nodes = [
+            n for n in graph_data.get("nodes", [])
+            if n.get("label", "") not in existing_labels_set
+        ]
+        graph_data["nodes"] = filtered_nodes
+        print(f"   └─ 去重前: {before_count} 个节点")
+        print(f"   └─ 去重后: {len(filtered_nodes)} 个节点")
+        
+        # ========== 7. System 动作：返回结果 ==========
+        print("\n[System] 📤 返回处理结果")
+        print(f"   └─ 新节点数量: {len(filtered_nodes)}")
+        print(f"   └─ 新边数量: {len(graph_data.get('edges', []))}")
+        if filtered_nodes:
+            print(f"   └─ 新节点列表:")
+            for i, node in enumerate(filtered_nodes, 1):
+                print(f"      {i}. [{node.get('category', 'unknown')}] {node.get('label', 'N/A')}")
+        
+        print(f"\n[System] ✅ 请求处理完成 (总耗时: {elapsed_time:.2f}秒)")
+        print("="*80 + "\n")
+        
+        return {
+            "success": True,
+            "data": graph_data
+        }
+        
+    except json.JSONDecodeError as e:
+        print(f"\n[System] ❌ JSON 解析错误: {str(e)}")
+        print(f"   └─ 原始内容:\n{original_content[:500]}")
+        raise HTTPException(status_code=500, detail=f"JSON解析失败: {str(e)}")
+    except Exception as e:
+        print(f"\n[System] ❌ 错误: {str(e)}")
+        import traceback
+        print(f"   └─ 错误详情:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"展开节点失败: {str(e)}")
+
+
+@app.post("/api/v2/context")
+async def v2_get_context(request: V2ContextRequest):
+    """
+    v2 版本：获取节点上下文信息
+    返回 Definition, Context, Action
+    """
+    print("\n" + "="*60)
+    print("📖 LinkLog v2 - 获取节点上下文")
+    print("="*60)
+    
+    # ========== 1. Agent 动作：接收上下文请求 ==========
+    print("\n[Agent] 📥 接收节点上下文请求")
+    print(f"   └─ 节点ID: {request.node_id}")
+    print(f"   └─ 节点标签: {request.node_label}")
+    print(f"   └─ 路径: {' → '.join(request.node_path)}")
+    
+    prompt = f"""用户的学习目标：{request.original_goal}
+当前路径：{' → '.join(request.node_path)}
+节点：{request.node_label}
+
+请提供以下信息：
+1. Definition: 一句话通俗解释这个节点是什么
+2. Context: 结合用户目标"{request.original_goal}"，解释为什么需要学习这个
+3. Action: 一个具体的行动建议（如：一条命令、一个步骤、一个资源链接）
+
+返回 JSON 格式：
+{{
+  "definition": "...",
+  "context": "...",
+  "action": "..."
+}}"""
+    
+    try:
+        # ========== 2. System 动作：准备 API 调用 ==========
+        print("\n[System] 🔧 准备 AI API 调用")
+        api_params = {
+            "model": "deepseek",
+            "temperature": 0.4,
+            "max_tokens": 300  # 大幅减少token以加快响应
+        }
+        print(f"   └─ 模型: {api_params['model']}")
+        print(f"   └─ 最大Token: {api_params['max_tokens']}")
+        
+        # ========== 3. System 动作：调用 AI（异步）==========
+        print("\n[System] 🤖 调用 AI API（异步）...")
+        import time
+        start_time = time.time()
+        
+        # 打印请求详情
+        print(f"[System] 📤 发送请求:")
+        print(f"   └─ 模型: {api_params['model']}")
+        print(f"   └─ max_tokens: {api_params['max_tokens']}")
+        print(f"   └─ User prompt长度: {len(prompt)} 字符")
+        
+        response = await client.chat.completions.create(
+            model=api_params["model"],
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是一位技术导师，用通俗易懂的语言解释技术概念。"
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=api_params["temperature"],
+            max_tokens=api_params["max_tokens"]
+        )
+        
+        elapsed_time = time.time() - start_time
+        
+        # ========== 4. Agent 响应：AI 返回结果 ==========
+        print(f"\n[Agent] ✅ AI 响应完成 (耗时: {elapsed_time:.2f}秒)")
+        
+        # 详细分析响应
+        message = response.choices[0].message
+        print(f"[Agent] 📥 响应详情:")
+        print(f"   └─ Finish reason: {message.finish_reason if hasattr(message, 'finish_reason') else 'N/A'}")
+        
+        # 检查是否有工具调用
+        if hasattr(message, 'tool_calls') and message.tool_calls:
+            print(f"[Agent] 🔧 检测到工具调用！数量: {len(message.tool_calls)}")
+            for i, tool_call in enumerate(message.tool_calls, 1):
+                print(f"   └─ 工具调用 {i}:")
+                print(f"      - ID: {tool_call.id if hasattr(tool_call, 'id') else 'N/A'}")
+                print(f"      - Type: {tool_call.type if hasattr(tool_call, 'type') else 'N/A'}")
+                if hasattr(tool_call, 'function'):
+                    print(f"      - Function: {tool_call.function.name if hasattr(tool_call.function, 'name') else 'N/A'}")
+                    print(f"      - Arguments: {tool_call.function.arguments[:200] if hasattr(tool_call.function, 'arguments') else 'N/A'}...")
+        else:
+            print(f"[Agent] ✅ 无工具调用（纯文本响应）")
+        
+        content = message.content if message.content else ""
+        print(f"   └─ 响应内容长度: {len(content)} 字符")
+        
+        # Token 使用详情
+        if hasattr(response, 'usage'):
+            usage = response.usage
+            print(f"\n[System] 📊 Token 使用详情:")
+            print(f"   └─ Prompt tokens: {usage.prompt_tokens if hasattr(usage, 'prompt_tokens') else 'N/A'}")
+            print(f"   └─ Completion tokens: {usage.completion_tokens if hasattr(usage, 'completion_tokens') else 'N/A'}")
+            print(f"   └─ Total tokens: {usage.total_tokens if hasattr(usage, 'total_tokens') else 'N/A'}")
+            
+            # 分析 token 使用
+            if hasattr(usage, 'total_tokens') and usage.total_tokens > api_params['max_tokens'] * 2:
+                print(f"\n[System] ⚠️ 警告：实际使用 tokens ({usage.total_tokens}) 远超设置的 max_tokens ({api_params['max_tokens']})")
+                print(f"   └─ 可能原因：")
+                print(f"      1. 进行了工具调用（网络搜索等）")
+                print(f"      2. API 端忽略了 max_tokens 限制")
+                print(f"      3. 模型生成了超长响应")
+        else:
+            print(f"   └─ 使用Token: N/A（无 usage 信息）")
+        
+        # ========== 5. System 动作：解析响应 ==========
+        print("\n[System] 🔍 解析 AI 响应")
+        original_content = content
+        
+        # 解析 JSON
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+            print("   └─ 检测到 Markdown JSON 代码块，已提取")
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0].strip()
+            print("   └─ 检测到代码块，已提取")
+        
+        context_data = json.loads(content)
+        print(f"   └─ JSON 解析成功")
+        print(f"   └─ Definition: {context_data.get('definition', 'N/A')[:50]}...")
+        
+        print(f"\n[System] ✅ 请求处理完成 (总耗时: {elapsed_time:.2f}秒)")
+        print("="*60 + "\n")
+        
+        return {
+            "success": True,
+            "data": context_data
+        }
+        
+    except json.JSONDecodeError as e:
+        print(f"\n[System] ❌ JSON 解析错误: {str(e)}")
+        print(f"   └─ 原始内容:\n{original_content[:300]}")
+        raise HTTPException(status_code=500, detail=f"JSON解析失败: {str(e)}")
+    except Exception as e:
+        print(f"\n[System] ❌ 错误: {str(e)}")
+        import traceback
+        print(f"   └─ 错误详情:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"获取上下文失败: {str(e)}")
+
+
 @app.post("/api/search")
 async def search_web_endpoint(query: str, max_results: int = 5):
     """
@@ -560,7 +1156,7 @@ async def add_url_to_existing(request: URLInput):
         print(f"\n[System] 步骤 3: 调用 AI 分析")
         print("-" * 80)
         print(f"[System] 模型: deepseek")
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model="deepseek",
             messages=[
                 {
@@ -622,12 +1218,49 @@ async def add_url_to_existing(request: URLInput):
         raise HTTPException(status_code=500, detail=f"添加 URL 失败: {str(e)}")
 
 
+# 处理 Next.js 静态导出的所有路由（SPA 回退）
+# 必须在所有 API 路由之后定义，否则会拦截 API 请求
+@app.get("/{path:path}")
+async def serve_frontend(path: str):
+    """服务 Next.js 前端路由（SPA 回退）"""
+    # 如果是 API 路由，跳过（应该已经被上面的路由处理了）
+    if path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="API endpoint not found")
+    
+    # 如果是静态资源（_next, public），跳过（应该已经被上面的 mount 处理了）
+    if path.startswith("_next/") or path.startswith("public/"):
+        raise HTTPException(status_code=404, detail="Static resource not found")
+    
+    # 尝试返回对应的 HTML 文件
+    html_path = frontend_out_dir / path / "index.html"
+    if html_path.exists():
+        return FileResponse(str(html_path), media_type="text/html")
+    
+    # 回退到根 index.html（SPA 路由）
+    index_path = frontend_out_dir / "index.html"
+    if index_path.exists():
+        return FileResponse(str(index_path), media_type="text/html")
+    
+    raise HTTPException(status_code=404, detail="Page not found")
+
+
 if __name__ == "__main__":
     import uvicorn
-    print("\n" + "="*50)
-    print("🚀 Logic Linker 服务器启动中...")
+    print(f"\n{'='*80}")
+    print(f"🚀 LinkLog {VERSION} 启动中...")
+    print(f"{'='*80}")
+    print(f"📡 服务地址: http://0.0.0.0:{PORT}")
+    print(f"📚 API 文档: http://0.0.0.0:{PORT}/docs")
     print(f"📁 静态文件目录: {static_dir}")
-    print(f"🌐 访问地址: http://localhost:8003")
-    print("="*50 + "\n")
-    uvicorn.run(app, host="0.0.0.0", port=8003, log_level="info")
+    if frontend_out_dir.exists():
+        print(f"✓ Next.js 静态导出目录存在: {frontend_out_dir}")
+    else:
+        print(f"⚠ Next.js 静态导出目录不存在: {frontend_out_dir}")
+    if static_dir.exists():
+        print(f"✓ v1 静态文件目录存在")
+    else:
+        print(f"⚠ v1 静态文件目录不存在")
+    print(f"🔑 API Key: {api_key[:20]}...")
+    print(f"{'='*80}\n")
+    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
 

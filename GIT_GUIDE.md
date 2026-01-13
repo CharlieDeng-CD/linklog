@@ -1,10 +1,10 @@
-# Logic Linker - Git 版本管理指南
+# LinkLog - Git 版本管理指南
 
 ## 快速开始
 
 ### 1. 初始化仓库（如果还没有）
 ```bash
-cd "logic linker"
+cd linklog
 git init
 ```
 
@@ -14,7 +14,7 @@ git init
 git add .
 
 # 创建首次提交
-git commit -m "Initial commit: Logic Linker MVP"
+git commit -m "Initial commit: LinkLog MVP"
 ```
 
 ## 基本工作流程
@@ -117,7 +117,7 @@ git merge <分支名>
 
 运行以下命令查看当前状态：
 ```bash
-cd "logic linker"
+cd linklog
 git status
 ```
 
@@ -131,7 +131,7 @@ git status
 git add .
 
 # 3. 创建首次提交
-git commit -m "feat: Logic Linker MVP - 课程知识图谱分析工具
+git commit -m "feat: LinkLog MVP - 课程知识图谱分析工具
 
 - 实现多源 URL 和文本输入
 - AI 自动提取逻辑主线和知识依赖

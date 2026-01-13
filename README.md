@@ -1,7 +1,7 @@
-# Logic Linker (逻辑串联器)
+# LinkLog (渐进式知识图谱生成器)
 
 ## 项目背景
-在学习文字版课程时，用户往往能理解主旨，但对其中涉及的陌生技术细节（支流知识）感到迷茫。Logic Linker 旨在通过 AI 技术解构课程逻辑，并以“画布”形式呈现主线与支线的依赖关系。
+在学习文字版课程时，用户往往能理解主旨，但对其中涉及的陌生技术细节（支流知识）感到迷茫。LinkLog 旨在通过 AI 技术解构课程逻辑，并以"画布"形式呈现主线与支线的依赖关系。
 
 ## 核心功能
 - **逻辑骨架提取**：自动识别课程的层级结构和核心主张。
@@ -17,7 +17,7 @@
 
 ## 目录结构
 ```
-logic linker/
+linklog/
 ├── server.py              # FastAPI 后端服务器
 ├── static/                # 前端静态文件
 │   ├── index.html         # 主页面
@@ -32,7 +32,7 @@ logic linker/
 
 ### 1. 安装依赖
 ```bash
-cd "logic linker"
+cd linklog
 pip install -r requirements.txt
 ```
 

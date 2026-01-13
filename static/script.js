@@ -1,4 +1,4 @@
-// Logic Linker - 前端核心逻辑
+// LinkLog - 前端核心逻辑
 
 const API_BASE = 'http://localhost:8003';
 

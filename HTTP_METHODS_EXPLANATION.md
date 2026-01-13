@@ -214,7 +214,7 @@ PATCH  /api/courses/1     → 部分更新课程 1
 DELETE /api/courses/1     → 删除课程 1
 ```
 
-## 在你的 Logic Linker 项目中的使用
+## 在你的 LinkLog 项目中的使用
 
 ### 当前使用的 HTTP 方法：
 

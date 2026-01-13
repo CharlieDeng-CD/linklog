@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-快速测试脚本 - 验证 Logic Linker 服务器配置
+快速测试脚本 - 验证 LinkLog 服务器配置
 """
 import sys
 from pathlib import Path
@@ -60,7 +60,7 @@ def test_server_routes():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("Logic Linker 配置检查")
+    print("LinkLog 配置检查")
     print("=" * 50)
     
     results = [
@@ -74,7 +74,7 @@ if __name__ == "__main__":
     if all(results):
         print("✓ 所有检查通过！服务器应该可以正常启动。")
         print("\n启动命令:")
-        print("  cd 'logic linker'")
+        print("  cd linklog")
         print("  python3 server.py")
         print("\n然后访问: http://localhost:8003")
     else:
