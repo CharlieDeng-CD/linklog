@@ -20,6 +20,7 @@ npm-debug.log
 .next
 dist
 build
+# 注意：frontend/out 不应该被忽略，因为它是构建产物
 
 # IDE
 .vscode

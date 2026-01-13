@@ -4,16 +4,26 @@ FROM node:18-alpine AS frontend-builder
 
 WORKDIR /app/frontend
 
+# 设置环境变量避免并发写入问题
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+# 禁用 Next.js 的并发优化，避免写入冲突
+ENV NEXT_PRIVATE_STANDALONE=true
+
 # 复制前端依赖文件
 COPY frontend/package*.json ./
 
-# 安装前端依赖
-RUN npm ci --only=production
+# 安装前端依赖（构建需要 devDependencies）
+RUN npm ci --legacy-peer-deps
 
 # 复制前端源代码
 COPY frontend/ .
 
 # 构建 Next.js 应用（输出静态文件）
+# 清理可能的旧构建产物
+RUN rm -rf .next out || true
+
+# 构建（单线程，避免并发写入）
 RUN npm run build
 
 # 阶段 2: Python 后端运行时
