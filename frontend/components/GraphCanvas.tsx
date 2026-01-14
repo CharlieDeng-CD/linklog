@@ -39,6 +39,12 @@ export default function GraphCanvas({
   const [loading, setLoading] = useState(false);
   // 跟踪每个节点的子节点（用于收起功能）
   const [nodeChildren, setNodeChildren] = useState<Map<string, Set<string>>>(new Map());
+  // 缓存已展开节点的完整数据（节点和边），用于快速重新展开
+  const [expandedNodesCache, setExpandedNodesCache] = useState<Map<string, { nodes: Node[], edges: Edge[] }>>(new Map());
+  // 缓存侧边栏内容（解释内容）
+  const [sidebarContextCache, setSidebarContextCache] = useState<Map<string, any>>(new Map());
+  // 双击检测：用于区分单击和双击
+  const [clickTimer, setClickTimer] = useState<NodeJS.Timeout | null>(null);
 
   // 初始化节点和边，并自动布局
   useEffect(() => {
@@ -147,113 +153,179 @@ export default function GraphCanvas({
 
   const handleNodeClick = useCallback(
     async (event: React.MouseEvent, node: Node) => {
-      // 双击收起节点
+      // 双击处理：收起或展开节点，不打开侧边栏
       if (event.detail === 2) {
+        // 清除单击定时器（如果有）
+        if (clickTimer) {
+          clearTimeout(clickTimer);
+          setClickTimer(null);
+        }
+        
         if (node.data.expanded) {
+          // 已展开，收起节点
           handleNodeCollapse(node.id);
+        } else {
+          // 未展开，展开节点（使用缓存或调用 API）
+          await expandNode(node);
         }
         return;
       }
 
-      setSelectedNode(node);
-      setSidebarOpen(true);
+      // 单击处理：延迟执行，如果检测到双击则取消
+      if (clickTimer) {
+        clearTimeout(clickTimer);
+      }
 
-      // 如果节点还未展开，则展开它
-      if (!node.data.expanded && !expandingNodeId) {
-        setExpandingNodeId(node.id);
-        setLoading(true);
+      const timer = setTimeout(async () => {
+        // 打开侧边栏（使用缓存或调用 API）
+        setSelectedNode(node);
+        setSidebarOpen(true);
+
+        // 如果节点还未展开，则展开它
+        if (!node.data.expanded && !expandingNodeId) {
+          await expandNode(node);
+        }
         
-        try {
-          const nodePath = [originalGoal, node.data.label];
-          const existingNodes = nodes.map((n) => ({
-            label: n.data.label,
-            id: n.id,
+        setClickTimer(null);
+      }, 200); // 200ms 延迟，用于检测双击
+
+      setClickTimer(timer);
+    },
+    [originalGoal, nodes, edges, nodeChildren, expandedNodesCache, sidebarContextCache, setNodes, setEdges, expandingNodeId, handleNodeCollapse, clickTimer]
+  );
+
+  // 展开节点的函数（提取出来，供单击和双击使用）
+  const expandNode = useCallback(
+    async (node: Node) => {
+      // 先检查缓存，如果存在则立即使用缓存数据
+      const cachedData = expandedNodesCache.get(node.id);
+      if (cachedData) {
+        // 使用缓存数据，立即展开（无需等待 API）
+        const allNodes = [...nodes, ...cachedData.nodes];
+        const allEdges = [...edges, ...cachedData.edges];
+        
+        // 标记节点为已展开
+        const updatedNodes = allNodes.map((n) =>
+          n.id === node.id ? { ...n, data: { ...n.data, expanded: true } } : n
+        );
+
+        // 记录子节点关系
+        const childIds = new Set(cachedData.nodes.map(n => n.id));
+        const newNodeChildren = new Map(nodeChildren);
+        newNodeChildren.set(node.id, childIds);
+        setNodeChildren(newNodeChildren);
+
+        // 自动布局
+        const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
+          updatedNodes,
+          allEdges
+        );
+
+        setNodes(layoutedNodes);
+        setEdges(layoutedEdges);
+        return; // 使用缓存，直接返回
+      }
+
+      // 缓存不存在，调用 API
+      setExpandingNodeId(node.id);
+      setLoading(true);
+      
+      try {
+        const nodePath = [originalGoal, node.data.label];
+        const existingNodes = nodes.map((n) => ({
+          label: n.data.label,
+          id: n.id,
+        }));
+
+        const response = await fetch('http://localhost:8003/api/v2/expand', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            original_goal: originalGoal,
+            node_id: node.id,
+            node_label: node.data.label,
+            node_path: nodePath,
+            node_category: node.data.category,
+            existing_nodes: existingNodes,
+          }),
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`API 错误 ${response.status}: ${errorText.substring(0, 100)}`);
+        }
+
+        const contentType = response.headers.get('content-type');
+        if (!contentType || !contentType.includes('application/json')) {
+          const text = await response.text();
+          throw new Error(`响应不是 JSON: ${text.substring(0, 100)}`);
+        }
+
+        const result = await response.json();
+
+        if (result.success && result.data.nodes.length > 0) {
+          // 添加新节点（临时位置）
+          const newNodes: Node[] = result.data.nodes.map((newNode: any) => ({
+            id: newNode.id,
+            type: 'customNode',
+            position: { x: 0, y: 0 }, // 临时位置，后续自动布局
+            data: {
+              label: newNode.label,
+              category: newNode.category || 'action',
+              description: newNode.description,
+              expanded: false,
+            },
           }));
 
-          const response = await fetch('http://localhost:8003/api/v2/expand', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              original_goal: originalGoal,
-              node_id: node.id,
-              node_label: node.data.label,
-              node_path: nodePath,
-              node_category: node.data.category,
-              existing_nodes: existingNodes,
-            }),
-          });
+          // 添加新边
+          const newEdges: Edge[] = result.data.edges.map((edge: any) => ({
+            id: `e${edge.source}-${edge.target}`,
+            source: edge.source,
+            target: edge.target,
+          }));
 
-          if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`API 错误 ${response.status}: ${errorText.substring(0, 100)}`);
-          }
+          // 保存到缓存
+          const newCache = new Map(expandedNodesCache);
+          newCache.set(node.id, { nodes: newNodes, edges: newEdges });
+          setExpandedNodesCache(newCache);
 
-          const contentType = response.headers.get('content-type');
-          if (!contentType || !contentType.includes('application/json')) {
-            const text = await response.text();
-            throw new Error(`响应不是 JSON: ${text.substring(0, 100)}`);
-          }
+          // 记录子节点关系
+          const childIds = new Set(newNodes.map(n => n.id));
+          const newNodeChildren = new Map(nodeChildren);
+          newNodeChildren.set(node.id, childIds);
+          setNodeChildren(newNodeChildren);
 
-          const result = await response.json();
+          // 合并所有节点和边，然后重新布局
+          const allNodes = [...nodes, ...newNodes];
+          const allEdges = [...edges, ...newEdges];
+          
+          // 标记节点为已展开
+          const updatedNodes = allNodes.map((n) =>
+            n.id === node.id ? { ...n, data: { ...n.data, expanded: true } } : n
+          );
 
-          if (result.success && result.data.nodes.length > 0) {
-            // 添加新节点（临时位置）
-            const newNodes: Node[] = result.data.nodes.map((newNode: any) => ({
-              id: newNode.id,
-              type: 'customNode',
-              position: { x: 0, y: 0 }, // 临时位置，后续自动布局
-              data: {
-                label: newNode.label,
-                category: newNode.category || 'action',
-                description: newNode.description,
-                expanded: false,
-              },
-            }));
+          // 自动布局
+          const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
+            updatedNodes,
+            allEdges
+          );
 
-            // 添加新边
-            const newEdges: Edge[] = result.data.edges.map((edge: any) => ({
-              id: `e${edge.source}-${edge.target}`,
-              source: edge.source,
-              target: edge.target,
-            }));
-
-            // 记录子节点关系
-            const childIds = new Set(newNodes.map(n => n.id));
-            const newNodeChildren = new Map(nodeChildren);
-            newNodeChildren.set(node.id, childIds);
-            setNodeChildren(newNodeChildren);
-
-            // 合并所有节点和边，然后重新布局
-            const allNodes = [...nodes, ...newNodes];
-            const allEdges = [...edges, ...newEdges];
-            
-            // 标记节点为已展开
-            const updatedNodes = allNodes.map((n) =>
-              n.id === node.id ? { ...n, data: { ...n.data, expanded: true } } : n
-            );
-
-            // 自动布局
-            const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
-              updatedNodes,
-              allEdges
-            );
-
-            setNodes(layoutedNodes);
-            setEdges(layoutedEdges);
-          }
-        } catch (error) {
-          console.error('展开节点失败:', error);
-          alert('展开节点失败，请重试');
-        } finally {
-          setExpandingNodeId(null);
-          setLoading(false);
+          setNodes(layoutedNodes);
+          setEdges(layoutedEdges);
         }
+      } catch (error) {
+        console.error('展开节点失败:', error);
+        alert('展开节点失败，请重试');
+      } finally {
+        setExpandingNodeId(null);
+        setLoading(false);
       }
     },
-    [originalGoal, nodes, edges, nodeChildren, setNodes, setEdges, expandingNodeId, handleNodeCollapse]
+    [originalGoal, nodes, edges, nodeChildren, expandedNodesCache, setNodes, setEdges]
   );
+
 
   return (
     <div className="fluid-gradient min-h-screen relative">
@@ -283,6 +355,8 @@ export default function GraphCanvas({
         <ContextSidebar
           node={selectedNode}
           originalGoal={originalGoal}
+          contextCache={sidebarContextCache}
+          setContextCache={setSidebarContextCache}
           onClose={() => {
             setSidebarOpen(false);
             setSelectedNode(null);

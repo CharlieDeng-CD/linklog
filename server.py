@@ -14,9 +14,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from openai import AsyncOpenAI
+from openai import APIError
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import asyncio
+import time
 
 # 加载环境变量
 env_path = Path(__file__).parent.parent / '.env'
@@ -24,7 +26,7 @@ load_dotenv(env_path)
 
 # 版本信息
 VERSION = os.getenv("VERSION", "v2.0.0")
-PORT = int(os.getenv("PORT", "8003"))
+PORT = int(os.getenv("PORT", "8000"))  # 统一使用 8000，与 Dockerfile 一致
 
 app = FastAPI(
     title="LinkLog API",
@@ -97,6 +99,363 @@ class AnalyzeRequest(BaseModel):
 
 
 # ==================== 工具函数 ====================
+
+def fix_json_string(json_str: str) -> str:
+    """
+    修复常见的 JSON 格式问题
+    
+    处理的问题：
+    1. 移除尾随逗号
+    2. 修复未闭合的字符串（添加闭合引号）
+    3. 转义字符串中的换行符
+    4. 修复未转义的引号
+    """
+    # 移除尾随逗号（在对象或数组的最后一个元素后）
+    json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
+    
+    # 修复未闭合的字符串字段值
+    # 匹配模式：字段名: "值（可能跨多行，未闭合）
+    # 例如："description": "使用 HTML/CSS/JS 或框架构建博客外观，确保在手机和电脑上
+    pattern = r'("(?:description|label|reason|summary|context|definition|action)":\s*")([^"]*(?:\n[^"]*)*?)(?=\s*[,}\]]|$)'
+    
+    def fix_field(match):
+        field_name = match.group(1)
+        field_value = match.group(2)
+        # 转义换行符和回车符
+        field_value = field_value.replace('\n', '\\n').replace('\r', '\\r')
+        # 移除末尾的空白字符
+        field_value = field_value.rstrip()
+        return field_name + field_value + '"'
+    
+    # 从后往前处理匹配，避免位置偏移问题
+    matches = list(re.finditer(pattern, json_str, re.MULTILINE | re.DOTALL))
+    for match in reversed(matches):
+        start, end = match.span()
+        # 检查这个匹配后面是否有闭合引号
+        after_match = json_str[end:end+10].strip()
+        # 如果后面没有引号，说明字符串未闭合
+        if not after_match.startswith('"'):
+            # 检查后面是否有逗号、}、]等
+            next_char = after_match[0] if after_match else ''
+            if next_char in [',', '}', ']', '\n']:
+                # 修复这个字段
+                fixed = fix_field(match)
+                json_str = json_str[:start] + fixed + json_str[end:]
+    
+    return json_str
+
+
+def parse_json_with_fallback(content: str) -> dict:
+    """
+    解析 JSON，带多层回退机制
+    
+    1. 尝试直接解析
+    2. 尝试修复后解析
+    3. 尝试提取 JSON 对象
+    4. 尝试部分提取数据
+    """
+    original_content = content
+    
+    # 步骤 1: 提取 JSON 代码块（如果有）
+    if "```json" in content:
+        content = content.split("```json")[1].split("```")[0].strip()
+    elif "```" in content:
+        parts = content.split("```")
+        if len(parts) >= 3:
+            content = parts[1].strip()
+            if content.startswith("json"):
+                content = content[4:].strip()
+    
+    # 步骤 2: 尝试直接解析
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as e:
+        print(f"   └─ JSON 直接解析失败: {e.msg} at line {e.lineno}, column {e.colno}")
+    
+    # 步骤 3: 尝试修复后解析
+    try:
+        fixed_content = fix_json_string(content)
+        return json.loads(fixed_content)
+    except json.JSONDecodeError as e:
+        print(f"   └─ JSON 修复后解析失败: {e.msg} at line {e.lineno}, column {e.colno}")
+    
+    # 步骤 4: 尝试提取完整的 JSON 对象（使用正则）
+    try:
+        # 查找第一个 { 到最后一个 } 之间的内容
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            extracted_json = json_match.group(0)
+            extracted_json = fix_json_string(extracted_json)
+            return json.loads(extracted_json)
+    except Exception as e:
+        print(f"   └─ 正则提取 JSON 失败: {str(e)}")
+    
+    # 步骤 5: 尝试部分提取数据
+    print("   └─ 尝试部分提取数据...")
+    result = {
+        "nodes": [],
+        "edges": [],
+        "summary": "JSON 解析失败，已提取部分数据"
+    }
+    
+    # 提取节点
+    node_pattern = r'"id"\s*:\s*"([^"]+)"\s*,\s*"label"\s*:\s*"([^"]*?)"(?:"|(?:\s*,\s*"category"|\s*,\s*"type"|\s*\}))'
+    nodes = re.findall(node_pattern, content, re.DOTALL)
+    for i, (node_id, label) in enumerate(nodes[:20]):
+        # 清理 label（移除换行和多余空格）
+        label = label.replace('\n', ' ').replace('\r', '').strip()
+        if label:
+            result["nodes"].append({
+                "id": node_id if node_id else f"n{i+1}",
+                "label": label,
+                "category": "action",  # 默认值
+                "description": ""
+            })
+    
+    # 提取边
+    edge_pattern = r'"source"\s*:\s*"([^"]+)"\s*,\s*"target"\s*:\s*"([^"]+)"'
+    edges = re.findall(edge_pattern, content)
+    for source, target in edges[:20]:
+        result["edges"].append({
+            "source": source,
+            "target": target,
+            "reason": ""
+        })
+    
+    print(f"   └─ 部分提取完成: {len(result['nodes'])} 个节点, {len(result['edges'])} 条边")
+    return result
+
+
+def log_ai_request(
+    endpoint_name: str,
+    system_prompt: str,
+    user_prompt: str,
+    model: str,
+    temperature: float,
+    max_tokens: int
+):
+    """
+    详细打印 AI API 请求信息（用于 Token 消耗分析）
+    """
+    print("\n" + "="*100)
+    print(f"🤖 AI API 请求 - {endpoint_name}")
+    print("="*100)
+    
+    # 计算字符数和估算token数（粗略估算：1 token ≈ 4 字符）
+    system_chars = len(system_prompt)
+    user_chars = len(user_prompt)
+    total_chars = system_chars + user_chars
+    
+    system_tokens_est = system_chars // 4
+    user_tokens_est = user_chars // 4
+    total_tokens_est = total_chars // 4
+    
+    print(f"\n📊 请求统计:")
+    print(f"  └─ 模型: {model}")
+    print(f"  └─ 温度: {temperature}")
+    print(f"  └─ 最大输出Token: {max_tokens}")
+    print(f"  └─ System Prompt 长度: {system_chars:,} 字符 (~{system_tokens_est:,} tokens)")
+    print(f"  └─ User Prompt 长度: {user_chars:,} 字符 (~{user_tokens_est:,} tokens)")
+    print(f"  └─ 总输入长度: {total_chars:,} 字符 (~{total_tokens_est:,} tokens)")
+    
+    print(f"\n📝 System Prompt (完整内容):")
+    print("-" * 100)
+    print(system_prompt)
+    print("-" * 100)
+    
+    print(f"\n📝 User Prompt (完整内容):")
+    print("-" * 100)
+    # 如果User Prompt太长，只显示前2000字符和最后500字符
+    if user_chars > 2500:
+        print(user_prompt[:2000])
+        print("\n... [中间内容已省略] ...\n")
+        print(user_prompt[-500:])
+        print(f"\n⚠️  提示: User Prompt 总长度 {user_chars:,} 字符，已省略中间部分")
+    else:
+        print(user_prompt)
+    print("-" * 100)
+    print("="*100 + "\n")
+
+
+async def call_ai_with_retry(
+    client: AsyncOpenAI,
+    model: str,
+    messages: List[Dict],
+    temperature: float,
+    max_tokens: int,
+    max_retries: int = 3,
+    retry_delay: float = 2.0,
+    fallback_models: List[str] = None,
+    disable_tools: bool = True
+):
+    """
+    带重试机制和备用模型的 AI API 调用
+    
+    Args:
+        client: OpenAI 客户端
+        model: 首选模型名称（如果为 "deepseek" 且不可用，会自动跳过）
+        messages: 消息列表
+        temperature: 温度参数
+        max_tokens: 最大token数
+        max_retries: 每个模型的最大重试次数
+        retry_delay: 重试延迟（秒）
+        fallback_models: 备用模型列表（如果主模型失败，会尝试这些模型）
+        disable_tools: 是否禁用工具调用（避免token激增）
+    
+    Returns:
+        API 响应对象
+    """
+    # 默认备用模型列表（优先使用 grok-4-fast，因为它不会自动进行工具调用）
+    if fallback_models is None:
+        fallback_models = ["grok-4-fast", "gemini-3-flash-preview"]
+    
+    # 如果主模型是 deepseek，直接跳过（因为完全不可用）
+    if model == "deepseek":
+        print(f"[System] ⚠️  deepseek 模型不可用，直接使用备用模型")
+        models_to_try = fallback_models
+    else:
+        # 尝试的模型列表：首选模型 + 备用模型
+        models_to_try = [model] + fallback_models
+    
+    for model_to_use in models_to_try:
+        print(f"\n[System] 🔄 尝试使用模型: {model_to_use}")
+        
+        for attempt in range(max_retries):
+            try:
+                # 构建API调用参数
+                api_params = {
+                    "model": model_to_use,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens
+                }
+                
+                # 禁用工具调用（避免token激增）
+                # 注意：某些模型（如grok-4-fast）不支持同时设置 tools=None 和 tool_choice
+                # 所以我们只设置 tools=None，不设置 tool_choice
+                if disable_tools:
+                    # 不传 tools 和 tool_choice 参数，让模型默认不使用工具
+                    pass  # 不设置任何工具相关参数即可禁用工具调用
+                
+                response = await client.chat.completions.create(**api_params)
+                
+                if model_to_use != model:
+                    print(f"[System] ✅ 备用模型 {model_to_use} 调用成功")
+                return response
+            except Exception as e:
+                last_error = e
+                error_msg = str(e)
+                
+                # 尝试从异常中提取状态码
+                status_code = None
+                if hasattr(e, 'status_code'):
+                    status_code = e.status_code
+                elif hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                    status_code = e.response.status_code
+                elif hasattr(e, 'code'):
+                    status_code = e.code
+                
+                # 检查是否是服务器错误（502, 503, 504）或网络错误
+                is_server_error = (
+                    status_code in [502, 503, 504] or
+                    "502" in error_msg or 
+                    "503" in error_msg or 
+                    "504" in error_msg or
+                    "Bad Gateway" in error_msg or
+                    "Service Unavailable" in error_msg or
+                    "Gateway Timeout" in error_msg or
+                    "InternalServerError" in str(type(e).__name__)
+                )
+                
+                if is_server_error:
+                    if attempt < max_retries - 1:
+                        wait_time = retry_delay * (attempt + 1)  # 指数退避
+                        print(f"\n[System] ⚠️  API 服务器错误 (模型: {model_to_use}, 状态码: {status_code}, 错误: {error_msg[:100]}...)，{wait_time:.1f}秒后重试 (尝试 {attempt + 1}/{max_retries})")
+                        await asyncio.sleep(wait_time)
+                        continue
+                    else:
+                        # 当前模型重试失败，尝试下一个备用模型
+                        print(f"\n[System] ⚠️  模型 {model_to_use} 重试 {max_retries} 次后仍然失败，尝试备用模型...")
+                        break  # 跳出当前模型的重试循环，尝试下一个模型
+                else:
+                    # 其他错误（如认证错误、参数错误等），如果是第一个模型，尝试备用模型；否则直接抛出
+                    if model_to_use == model and len(models_to_try) > 1:
+                        print(f"\n[System] ⚠️  模型 {model_to_use} 遇到非服务器错误: {error_msg[:200]}，尝试备用模型...")
+                        break  # 尝试备用模型
+                    else:
+                        print(f"\n[System] ❌ API 错误: {error_msg[:200]}")
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"AI API 调用失败: {error_msg[:200]}"
+                        )
+        else:
+            # 如果当前模型的所有重试都成功完成（没有break），说明已经返回了响应
+            continue
+        
+        # 如果执行到这里，说明当前模型失败了，继续尝试下一个模型
+        continue
+    
+    # 如果所有模型都失败了
+    raise HTTPException(
+        status_code=503,
+        detail=f"AI 服务暂时不可用。已尝试 {len(models_to_try)} 个模型，每个模型重试 {max_retries} 次，请稍后再试。如果问题持续，请联系服务提供商。"
+    )
+
+
+def log_ai_response(
+    endpoint_name: str,
+    response_content: str,
+    usage: Optional[object] = None,
+    show_full_response: bool = False
+):
+    """
+    详细打印 AI API 响应信息（用于 Token 消耗分析）
+    """
+    print("\n" + "="*100)
+    print(f"✅ AI API 响应 - {endpoint_name}")
+    print("="*100)
+    
+    # Token 使用详情
+    if usage:
+        prompt_tokens = getattr(usage, 'prompt_tokens', None)
+        completion_tokens = getattr(usage, 'completion_tokens', None)
+        total_tokens = getattr(usage, 'total_tokens', None)
+        
+        print(f"\n📊 Token 使用详情:")
+        if prompt_tokens:
+            print(f"  └─ 输入 Token (Prompt): {prompt_tokens:,}")
+        if completion_tokens:
+            print(f"  └─ 输出 Token (Completion): {completion_tokens:,}")
+        if total_tokens:
+            print(f"  └─ 总计 Token: {total_tokens:,}")
+            
+            # 计算Token占比
+            if prompt_tokens and completion_tokens:
+                prompt_pct = (prompt_tokens / total_tokens) * 100
+                completion_pct = (completion_tokens / total_tokens) * 100
+                print(f"  └─ 输入占比: {prompt_pct:.1f}% | 输出占比: {completion_pct:.1f}%")
+    else:
+        print(f"\n⚠️  无 Token 使用信息")
+    
+    # 响应内容
+    response_chars = len(response_content)
+    print(f"\n📄 响应内容:")
+    print(f"  └─ 长度: {response_chars:,} 字符")
+    
+    if show_full_response or response_chars < 2000:
+        print("-" * 100)
+        print(response_content)
+        print("-" * 100)
+    else:
+        print("-" * 100)
+        print(response_content[:1000])
+        print("\n... [中间内容已省略] ...\n")
+        print(response_content[-500:])
+        print("-" * 100)
+        print(f"⚠️  提示: 响应总长度 {response_chars:,} 字符，已省略中间部分")
+    
+    print("="*100 + "\n")
+
 
 async def web_search(query: str, max_results: int = 3) -> dict:
     """
@@ -603,7 +962,9 @@ async def v2_init_graph(request: V2InitRequest):
 **重要要求：**
 1. 必须识别出至少 1-2 个 prerequisite 节点（用暖色高亮显示）
 2. 节点描述要结合用户目标，解释"为什么需要这个"
-3. 返回严格的 JSON 格式
+3. **必须为所有节点创建边**：每个节点都应该至少有一条边连接（作为 source 或 target），确保图谱的完整性和逻辑连贯性
+4. 边的创建要基于知识的逻辑关系：依赖关系、先后顺序、包含关系等，不要创建无意义的连接
+5. 返回严格的 JSON 格式
 
 **返回格式：**
 {{
@@ -628,9 +989,9 @@ async def v2_init_graph(request: V2InitRequest):
         # ========== 2. System 动作：准备 API 调用 ==========
         print("\n[System] 🔧 准备 AI API 调用")
         api_params = {
-            "model": "deepseek",
+            "model": "grok-4-fast",  # 直接使用备用模型（deepseek不可用）
             "temperature": 0.3,
-            "max_tokens": 1000  # 减少token以加快响应
+            "max_tokens": 1500  # 增加token以确保完整输出（之前1000太小导致截断）
         }
         print(f"   └─ 模型: {api_params['model']}")
         print(f"   └─ 温度: {api_params['temperature']}")
@@ -638,95 +999,77 @@ async def v2_init_graph(request: V2InitRequest):
         print(f"   └─ Prompt长度: {len(prompt)} 字符")
         
         # ========== 3. System 动作：调用 AI（异步）==========
-        print("\n[System] 🤖 调用 AI API（异步）...")
         import time
         start_time = time.time()
         
-        # 打印请求详情
-        print(f"[System] 📤 发送请求:")
-        print(f"   └─ 模型: {api_params['model']}")
-        print(f"   └─ Messages数量: 2")
-        print(f"   └─ System prompt长度: {len('你是一位技术导师专家，擅长识别学习路径中的前置知识和依赖关系。始终返回有效的 JSON 格式。')} 字符")
-        print(f"   └─ User prompt长度: {len(prompt)} 字符")
-        print(f"   └─ max_tokens: {api_params['max_tokens']}")
-        print(f"   └─ temperature: {api_params['temperature']}")
+        # 准备 System Prompt
+        system_prompt_content = "你是一位技术导师专家，擅长识别学习路径中的前置知识和依赖关系。始终返回有效的 JSON 格式。"
         
-        response = await client.chat.completions.create(
+        # 详细打印请求信息
+        log_ai_request(
+            endpoint_name="v2_init",
+            system_prompt=system_prompt_content,
+            user_prompt=prompt,
             model=api_params["model"],
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是一位技术导师专家，擅长识别学习路径中的前置知识和依赖关系。始终返回有效的 JSON 格式。"
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
             temperature=api_params["temperature"],
             max_tokens=api_params["max_tokens"]
+        )
+        
+        # 使用带重试的 API 调用
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt_content
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+        
+        response = await call_ai_with_retry(
+            client=client,
+            model=api_params["model"],
+            messages=messages,
+            temperature=api_params["temperature"],
+            max_tokens=api_params["max_tokens"],
+            max_retries=3,
+            retry_delay=2.0,
+            disable_tools=True  # 禁用工具调用，避免token激增
         )
         
         elapsed_time = time.time() - start_time
         
         # ========== 4. Agent 响应：AI 返回结果 ==========
-        print(f"\n[Agent] ✅ AI 响应完成 (耗时: {elapsed_time:.2f}秒)")
-        
-        # 详细分析响应
         message = response.choices[0].message
-        print(f"[Agent] 📥 响应详情:")
-        print(f"   └─ Finish reason: {message.finish_reason if hasattr(message, 'finish_reason') else 'N/A'}")
-        
-        # 检查是否有工具调用
-        if hasattr(message, 'tool_calls') and message.tool_calls:
-            print(f"[Agent] 🔧 检测到工具调用！数量: {len(message.tool_calls)}")
-            for i, tool_call in enumerate(message.tool_calls, 1):
-                print(f"   └─ 工具调用 {i}:")
-                print(f"      - ID: {tool_call.id if hasattr(tool_call, 'id') else 'N/A'}")
-                print(f"      - Type: {tool_call.type if hasattr(tool_call, 'type') else 'N/A'}")
-                if hasattr(tool_call, 'function'):
-                    print(f"      - Function: {tool_call.function.name if hasattr(tool_call.function, 'name') else 'N/A'}")
-                    print(f"      - Arguments: {tool_call.function.arguments[:200] if hasattr(tool_call.function, 'arguments') else 'N/A'}...")
-        else:
-            print(f"[Agent] ✅ 无工具调用（纯文本响应）")
-        
         content = message.content if message.content else ""
-        print(f"   └─ 响应内容长度: {len(content)} 字符")
+        usage = response.usage if hasattr(response, 'usage') else None
         
-        # Token 使用详情
-        if hasattr(response, 'usage'):
-            usage = response.usage
-            print(f"\n[System] 📊 Token 使用详情:")
-            print(f"   └─ Prompt tokens: {usage.prompt_tokens if hasattr(usage, 'prompt_tokens') else 'N/A'}")
-            print(f"   └─ Completion tokens: {usage.completion_tokens if hasattr(usage, 'completion_tokens') else 'N/A'}")
-            print(f"   └─ Total tokens: {usage.total_tokens if hasattr(usage, 'total_tokens') else 'N/A'}")
-            
-            # 分析 token 使用
-            if hasattr(usage, 'total_tokens') and usage.total_tokens > api_params['max_tokens'] * 2:
-                print(f"\n[System] ⚠️ 警告：实际使用 tokens ({usage.total_tokens}) 远超设置的 max_tokens ({api_params['max_tokens']})")
-                print(f"   └─ 可能原因：")
-                print(f"      1. 进行了工具调用（网络搜索等）")
-                print(f"      2. API 端忽略了 max_tokens 限制")
-                print(f"      3. 模型生成了超长响应")
-        else:
-            print(f"   └─ 使用Token: N/A（无 usage 信息）")
+        # 详细打印响应信息
+        log_ai_response(
+            endpoint_name="v2_init",
+            response_content=content,
+            usage=usage,
+            show_full_response=True
+        )
         
-        print(f"   └─ 原始响应预览:\n{content[:300]}...")
+        print(f"⏱️  请求耗时: {elapsed_time:.2f}秒")
         
         # ========== 5. System 动作：解析响应 ==========
         print("\n[System] 🔍 解析 AI 响应")
         original_content = content
         
-        # 解析 JSON
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0].strip()
-            print("   └─ 检测到 Markdown JSON 代码块，已提取")
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0].strip()
-            print("   └─ 检测到代码块，已提取")
-        
-        graph_data = json.loads(content)
-        print(f"   └─ JSON 解析成功")
+        # 使用改进的 JSON 解析函数
+        try:
+            graph_data = parse_json_with_fallback(content)
+            print(f"   └─ JSON 解析成功")
+        except Exception as e:
+            print(f"\n[System] ❌ JSON 解析完全失败: {str(e)}")
+            print(f"   └─ 原始内容预览:\n{original_content[:500]}...")
+            raise HTTPException(
+                status_code=500,
+                detail=f"无法解析 AI 返回的 JSON。错误: {str(e)}。请重试。"
+            )
         
         # 验证数据结构
         if "nodes" not in graph_data:
@@ -734,7 +1077,31 @@ async def v2_init_graph(request: V2InitRequest):
         if "edges" not in graph_data:
             graph_data["edges"] = []
         
-        # ========== 6. System 动作：返回结果 ==========
+        # ========== 6. System 动作：确保节点连接（处理孤立节点）==========
+        print("\n[System] 🔗 检查并修复孤立节点")
+        nodes = graph_data["nodes"]
+        edges = graph_data["edges"]
+        
+        if len(nodes) > 0:
+            # 收集所有有边的节点ID
+            connected_node_ids = set()
+            for edge in edges:
+                connected_node_ids.add(edge.get("source"))
+                connected_node_ids.add(edge.get("target"))
+            
+            # 找出孤立节点（没有边的节点）
+            all_node_ids = {node.get("id") for node in nodes}
+            isolated_node_ids = all_node_ids - connected_node_ids
+            
+            if isolated_node_ids:
+                isolated_labels = [node.get("label", node.get("id")) for node in nodes if node.get("id") in isolated_node_ids]
+                print(f"   ⚠️  发现 {len(isolated_node_ids)} 个孤立节点: {isolated_labels}")
+                print(f"   └─ 提示: 这些节点没有边连接，建议在 Prompt 中明确要求 AI 为所有节点创建边")
+                print(f"   └─ 注意: 不会强行连接，保持图谱的逻辑完整性")
+            else:
+                print(f"   ✅ 所有节点都已连接")
+        
+        # ========== 7. System 动作：返回结果 ==========
         print("\n[System] 📤 返回处理结果")
         print(f"   └─ 节点数量: {len(graph_data['nodes'])}")
         print(f"   └─ 边数量: {len(graph_data['edges'])}")
@@ -751,11 +1118,6 @@ async def v2_init_graph(request: V2InitRequest):
         print("="*80 + "\n")
         
         return response_data
-        
-    except json.JSONDecodeError as e:
-        print(f"\n[System] ❌ JSON 解析错误: {str(e)}")
-        print(f"   └─ 原始内容:\n{original_content[:500]}")
-        raise HTTPException(status_code=500, detail=f"JSON解析失败: {str(e)}")
     except Exception as e:
         print(f"\n[System] ❌ 错误: {str(e)}")
         import traceback
@@ -803,7 +1165,9 @@ async def v2_expand_node(request: V2ExpandRequest):
 1. 子节点的解释必须回溯到原始目标"{request.original_goal}"，说明"在你的目标中，为什么需要学习这个"
 2. 避免生成与已有节点重复的概念
 3. 优先识别 prerequisite 类型的节点（用户可能不知道的知识）
-4. 返回严格的 JSON 格式
+4. **必须为所有子节点创建边**：每个子节点都应该至少有一条边连接到父节点"{request.node_label}"（source: "{request.node_id}"），确保图谱的完整性和逻辑连贯性
+5. 边的创建要基于知识的逻辑关系：依赖关系、先后顺序、包含关系等，reason 字段要清晰说明为什么需要这个连接
+6. 返回严格的 JSON 格式
 
 **返回格式：**
 {{
@@ -828,9 +1192,9 @@ async def v2_expand_node(request: V2ExpandRequest):
         # ========== 2. System 动作：准备 API 调用 ==========
         print("\n[System] 🔧 准备 AI API 调用")
         api_params = {
-            "model": "deepseek",
+            "model": "grok-4-fast",  # 直接使用备用模型（deepseek不可用）
             "temperature": 0.3,
-            "max_tokens": 800  # 减少token以加快响应
+            "max_tokens": 1200  # 增加token以确保完整输出（之前800太小导致截断）
         }
         print(f"   └─ 模型: {api_params['model']}")
         print(f"   └─ 温度: {api_params['temperature']}")
@@ -838,92 +1202,77 @@ async def v2_expand_node(request: V2ExpandRequest):
         print(f"   └─ Prompt长度: {len(prompt)} 字符")
         
         # ========== 3. System 动作：调用 AI（异步）==========
-        print("\n[System] 🤖 调用 AI API（异步）...")
         import time
         start_time = time.time()
         
-        # 打印请求详情
-        print(f"[System] 📤 发送请求:")
-        print(f"   └─ 模型: {api_params['model']}")
-        print(f"   └─ max_tokens: {api_params['max_tokens']}")
-        print(f"   └─ User prompt长度: {len(prompt)} 字符")
+        # 准备 System Prompt
+        system_prompt_content = "你是一位技术导师专家，擅长识别学习路径中的前置知识和依赖关系。始终返回有效的 JSON 格式，确保上下文一致性。"
         
-        response = await client.chat.completions.create(
+        # 详细打印请求信息
+        log_ai_request(
+            endpoint_name="v2_expand",
+            system_prompt=system_prompt_content,
+            user_prompt=prompt,
             model=api_params["model"],
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是一位技术导师专家，擅长识别学习路径中的前置知识和依赖关系。始终返回有效的 JSON 格式，确保上下文一致性。"
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
             temperature=api_params["temperature"],
             max_tokens=api_params["max_tokens"]
+        )
+        
+        # 使用带重试的 API 调用
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt_content
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+        
+        response = await call_ai_with_retry(
+            client=client,
+            model=api_params["model"],
+            messages=messages,
+            temperature=api_params["temperature"],
+            max_tokens=api_params["max_tokens"],
+            max_retries=3,
+            retry_delay=2.0,
+            disable_tools=True  # 禁用工具调用，避免token激增
         )
         
         elapsed_time = time.time() - start_time
         
         # ========== 4. Agent 响应：AI 返回结果 ==========
-        print(f"\n[Agent] ✅ AI 响应完成 (耗时: {elapsed_time:.2f}秒)")
-        
-        # 详细分析响应
         message = response.choices[0].message
-        print(f"[Agent] 📥 响应详情:")
-        print(f"   └─ Finish reason: {message.finish_reason if hasattr(message, 'finish_reason') else 'N/A'}")
-        
-        # 检查是否有工具调用
-        if hasattr(message, 'tool_calls') and message.tool_calls:
-            print(f"[Agent] 🔧 检测到工具调用！数量: {len(message.tool_calls)}")
-            for i, tool_call in enumerate(message.tool_calls, 1):
-                print(f"   └─ 工具调用 {i}:")
-                print(f"      - ID: {tool_call.id if hasattr(tool_call, 'id') else 'N/A'}")
-                print(f"      - Type: {tool_call.type if hasattr(tool_call, 'type') else 'N/A'}")
-                if hasattr(tool_call, 'function'):
-                    print(f"      - Function: {tool_call.function.name if hasattr(tool_call.function, 'name') else 'N/A'}")
-                    print(f"      - Arguments: {tool_call.function.arguments[:200] if hasattr(tool_call.function, 'arguments') else 'N/A'}...")
-        else:
-            print(f"[Agent] ✅ 无工具调用（纯文本响应）")
-        
         content = message.content if message.content else ""
-        print(f"   └─ 响应内容长度: {len(content)} 字符")
+        usage = response.usage if hasattr(response, 'usage') else None
         
-        # Token 使用详情
-        if hasattr(response, 'usage'):
-            usage = response.usage
-            print(f"\n[System] 📊 Token 使用详情:")
-            print(f"   └─ Prompt tokens: {usage.prompt_tokens if hasattr(usage, 'prompt_tokens') else 'N/A'}")
-            print(f"   └─ Completion tokens: {usage.completion_tokens if hasattr(usage, 'completion_tokens') else 'N/A'}")
-            print(f"   └─ Total tokens: {usage.total_tokens if hasattr(usage, 'total_tokens') else 'N/A'}")
-            
-            # 分析 token 使用
-            if hasattr(usage, 'total_tokens') and usage.total_tokens > api_params['max_tokens'] * 2:
-                print(f"\n[System] ⚠️ 警告：实际使用 tokens ({usage.total_tokens}) 远超设置的 max_tokens ({api_params['max_tokens']})")
-                print(f"   └─ 可能原因：")
-                print(f"      1. 进行了工具调用（网络搜索等）")
-                print(f"      2. API 端忽略了 max_tokens 限制")
-                print(f"      3. 模型生成了超长响应")
-        else:
-            print(f"   └─ 使用Token: N/A（无 usage 信息）")
+        # 详细打印响应信息
+        log_ai_response(
+            endpoint_name="v2_expand",
+            response_content=content,
+            usage=usage,
+            show_full_response=True
+        )
         
-        print(f"   └─ 原始响应预览:\n{content[:300]}...")
+        print(f"⏱️  请求耗时: {elapsed_time:.2f}秒")
         
         # ========== 5. System 动作：解析响应 ==========
         print("\n[System] 🔍 解析 AI 响应")
         original_content = content
         
-        # 解析 JSON
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0].strip()
-            print("   └─ 检测到 Markdown JSON 代码块，已提取")
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0].strip()
-            print("   └─ 检测到代码块，已提取")
-        
-        graph_data = json.loads(content)
-        print(f"   └─ JSON 解析成功")
+        # 使用改进的 JSON 解析函数
+        try:
+            graph_data = parse_json_with_fallback(content)
+            print(f"   └─ JSON 解析成功")
+        except Exception as e:
+            print(f"\n[System] ❌ JSON 解析完全失败: {str(e)}")
+            print(f"   └─ 原始内容预览:\n{original_content[:500]}...")
+            raise HTTPException(
+                status_code=500,
+                detail=f"无法解析 AI 返回的 JSON。错误: {str(e)}。请重试。"
+            )
         
         # ========== 6. System 动作：节点去重 ==========
         print("\n[System] 🔄 执行节点去重")
@@ -937,7 +1286,35 @@ async def v2_expand_node(request: V2ExpandRequest):
         print(f"   └─ 去重前: {before_count} 个节点")
         print(f"   └─ 去重后: {len(filtered_nodes)} 个节点")
         
-        # ========== 7. System 动作：返回结果 ==========
+        # ========== 7. System 动作：检查节点连接（不强行修复）==========
+        print("\n[System] 🔗 检查节点连接情况")
+        nodes = graph_data["nodes"]
+        edges = graph_data.get("edges", [])
+        
+        if len(nodes) > 0:
+            # 收集所有有边的节点ID（包括父节点）
+            connected_node_ids = set()
+            for edge in edges:
+                connected_node_ids.add(edge.get("source"))
+                connected_node_ids.add(edge.get("target"))
+            
+            # 父节点ID（要展开的节点）
+            parent_node_id = request.node_id
+            connected_node_ids.add(parent_node_id)  # 父节点也算已连接
+            
+            # 找出孤立节点（没有边的节点）
+            all_node_ids = {node.get("id") for node in nodes}
+            isolated_node_ids = all_node_ids - connected_node_ids
+            
+            if isolated_node_ids:
+                isolated_labels = [node.get("label", node.get("id")) for node in nodes if node.get("id") in isolated_node_ids]
+                print(f"   ⚠️  发现 {len(isolated_node_ids)} 个孤立节点: {isolated_labels}")
+                print(f"   └─ 提示: 这些节点没有边连接到父节点，建议在 Prompt 中明确要求 AI 为所有子节点创建边")
+                print(f"   └─ 注意: 不会强行连接，保持图谱的逻辑完整性")
+            else:
+                print(f"   ✅ 所有子节点都已连接到父节点")
+        
+        # ========== 8. System 动作：返回结果 ==========
         print("\n[System] 📤 返回处理结果")
         print(f"   └─ 新节点数量: {len(filtered_nodes)}")
         print(f"   └─ 新边数量: {len(graph_data.get('edges', []))}")
@@ -953,11 +1330,6 @@ async def v2_expand_node(request: V2ExpandRequest):
             "success": True,
             "data": graph_data
         }
-        
-    except json.JSONDecodeError as e:
-        print(f"\n[System] ❌ JSON 解析错误: {str(e)}")
-        print(f"   └─ 原始内容:\n{original_content[:500]}")
-        raise HTTPException(status_code=500, detail=f"JSON解析失败: {str(e)}")
     except Exception as e:
         print(f"\n[System] ❌ 错误: {str(e)}")
         import traceback
@@ -1001,99 +1373,86 @@ async def v2_get_context(request: V2ContextRequest):
         # ========== 2. System 动作：准备 API 调用 ==========
         print("\n[System] 🔧 准备 AI API 调用")
         api_params = {
-            "model": "deepseek",
+            "model": "grok-4-fast",  # 直接使用备用模型（deepseek不可用）
             "temperature": 0.4,
-            "max_tokens": 300  # 大幅减少token以加快响应
+            "max_tokens": 500  # 增加token以确保完整输出（之前300太小导致截断）
         }
         print(f"   └─ 模型: {api_params['model']}")
         print(f"   └─ 最大Token: {api_params['max_tokens']}")
         
         # ========== 3. System 动作：调用 AI（异步）==========
-        print("\n[System] 🤖 调用 AI API（异步）...")
         import time
         start_time = time.time()
         
-        # 打印请求详情
-        print(f"[System] 📤 发送请求:")
-        print(f"   └─ 模型: {api_params['model']}")
-        print(f"   └─ max_tokens: {api_params['max_tokens']}")
-        print(f"   └─ User prompt长度: {len(prompt)} 字符")
+        # 准备 System Prompt
+        system_prompt_content = "你是一位技术导师，用通俗易懂的语言解释技术概念。"
         
-        response = await client.chat.completions.create(
+        # 详细打印请求信息
+        log_ai_request(
+            endpoint_name="v2_context",
+            system_prompt=system_prompt_content,
+            user_prompt=prompt,
             model=api_params["model"],
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是一位技术导师，用通俗易懂的语言解释技术概念。"
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
             temperature=api_params["temperature"],
             max_tokens=api_params["max_tokens"]
+        )
+        
+        # 使用带重试的 API 调用
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt_content
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+        
+        response = await call_ai_with_retry(
+            client=client,
+            model=api_params["model"],
+            messages=messages,
+            temperature=api_params["temperature"],
+            max_tokens=api_params["max_tokens"],
+            max_retries=3,
+            retry_delay=2.0,
+            disable_tools=True  # 禁用工具调用，避免token激增
         )
         
         elapsed_time = time.time() - start_time
         
         # ========== 4. Agent 响应：AI 返回结果 ==========
-        print(f"\n[Agent] ✅ AI 响应完成 (耗时: {elapsed_time:.2f}秒)")
-        
-        # 详细分析响应
         message = response.choices[0].message
-        print(f"[Agent] 📥 响应详情:")
-        print(f"   └─ Finish reason: {message.finish_reason if hasattr(message, 'finish_reason') else 'N/A'}")
-        
-        # 检查是否有工具调用
-        if hasattr(message, 'tool_calls') and message.tool_calls:
-            print(f"[Agent] 🔧 检测到工具调用！数量: {len(message.tool_calls)}")
-            for i, tool_call in enumerate(message.tool_calls, 1):
-                print(f"   └─ 工具调用 {i}:")
-                print(f"      - ID: {tool_call.id if hasattr(tool_call, 'id') else 'N/A'}")
-                print(f"      - Type: {tool_call.type if hasattr(tool_call, 'type') else 'N/A'}")
-                if hasattr(tool_call, 'function'):
-                    print(f"      - Function: {tool_call.function.name if hasattr(tool_call.function, 'name') else 'N/A'}")
-                    print(f"      - Arguments: {tool_call.function.arguments[:200] if hasattr(tool_call.function, 'arguments') else 'N/A'}...")
-        else:
-            print(f"[Agent] ✅ 无工具调用（纯文本响应）")
-        
         content = message.content if message.content else ""
-        print(f"   └─ 响应内容长度: {len(content)} 字符")
+        usage = response.usage if hasattr(response, 'usage') else None
         
-        # Token 使用详情
-        if hasattr(response, 'usage'):
-            usage = response.usage
-            print(f"\n[System] 📊 Token 使用详情:")
-            print(f"   └─ Prompt tokens: {usage.prompt_tokens if hasattr(usage, 'prompt_tokens') else 'N/A'}")
-            print(f"   └─ Completion tokens: {usage.completion_tokens if hasattr(usage, 'completion_tokens') else 'N/A'}")
-            print(f"   └─ Total tokens: {usage.total_tokens if hasattr(usage, 'total_tokens') else 'N/A'}")
-            
-            # 分析 token 使用
-            if hasattr(usage, 'total_tokens') and usage.total_tokens > api_params['max_tokens'] * 2:
-                print(f"\n[System] ⚠️ 警告：实际使用 tokens ({usage.total_tokens}) 远超设置的 max_tokens ({api_params['max_tokens']})")
-                print(f"   └─ 可能原因：")
-                print(f"      1. 进行了工具调用（网络搜索等）")
-                print(f"      2. API 端忽略了 max_tokens 限制")
-                print(f"      3. 模型生成了超长响应")
-        else:
-            print(f"   └─ 使用Token: N/A（无 usage 信息）")
+        # 详细打印响应信息
+        log_ai_response(
+            endpoint_name="v2_context",
+            response_content=content,
+            usage=usage,
+            show_full_response=True
+        )
+        
+        print(f"⏱️  请求耗时: {elapsed_time:.2f}秒")
         
         # ========== 5. System 动作：解析响应 ==========
         print("\n[System] 🔍 解析 AI 响应")
         original_content = content
         
-        # 解析 JSON
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0].strip()
-            print("   └─ 检测到 Markdown JSON 代码块，已提取")
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0].strip()
-            print("   └─ 检测到代码块，已提取")
-        
-        context_data = json.loads(content)
-        print(f"   └─ JSON 解析成功")
-        print(f"   └─ Definition: {context_data.get('definition', 'N/A')[:50]}...")
+        # 使用改进的 JSON 解析函数
+        try:
+            context_data = parse_json_with_fallback(content)
+            print(f"   └─ JSON 解析成功")
+            print(f"   └─ Definition: {context_data.get('definition', 'N/A')[:50]}...")
+        except Exception as e:
+            print(f"\n[System] ❌ JSON 解析完全失败: {str(e)}")
+            print(f"   └─ 原始内容预览:\n{original_content[:300]}...")
+            raise HTTPException(
+                status_code=500,
+                detail=f"无法解析 AI 返回的 JSON。错误: {str(e)}。请重试。"
+            )
         
         print(f"\n[System] ✅ 请求处理完成 (总耗时: {elapsed_time:.2f}秒)")
         print("="*60 + "\n")
@@ -1102,11 +1461,6 @@ async def v2_get_context(request: V2ContextRequest):
             "success": True,
             "data": context_data
         }
-        
-    except json.JSONDecodeError as e:
-        print(f"\n[System] ❌ JSON 解析错误: {str(e)}")
-        print(f"   └─ 原始内容:\n{original_content[:300]}")
-        raise HTTPException(status_code=500, detail=f"JSON解析失败: {str(e)}")
     except Exception as e:
         print(f"\n[System] ❌ 错误: {str(e)}")
         import traceback

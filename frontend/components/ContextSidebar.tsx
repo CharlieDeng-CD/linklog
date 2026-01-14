@@ -7,18 +7,32 @@ import { Node } from 'reactflow';
 interface ContextSidebarProps {
   node: Node;
   originalGoal: string;
+  contextCache: Map<string, any>;
+  setContextCache: (cache: Map<string, any>) => void;
   onClose: () => void;
 }
 
 export default function ContextSidebar({
   node,
   originalGoal,
+  contextCache,
+  setContextCache,
   onClose,
 }: ContextSidebarProps) {
   const [context, setContext] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // 先检查缓存
+    const cachedContext = contextCache.get(node.id);
+    if (cachedContext) {
+      // 使用缓存，立即显示
+      setContext(cachedContext);
+      setLoading(false);
+      return;
+    }
+
+    // 缓存不存在，调用 API
     const fetchContext = async () => {
       setLoading(true);
       try {
@@ -50,6 +64,10 @@ export default function ContextSidebar({
         const result = await response.json();
         if (result.success) {
           setContext(result.data);
+          // 保存到缓存
+          const newCache = new Map(contextCache);
+          newCache.set(node.id, result.data);
+          setContextCache(newCache);
         }
       } catch (error) {
         console.error('获取上下文失败:', error);
@@ -59,7 +77,7 @@ export default function ContextSidebar({
     };
 
     fetchContext();
-  }, [node, originalGoal]);
+  }, [node, originalGoal, contextCache, setContextCache]);
 
   return (
     <div className="fixed right-0 top-0 h-full w-96 glass shadow-2xl z-50 transform transition-transform duration-300">
