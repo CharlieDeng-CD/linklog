@@ -68,8 +68,9 @@ USER appuser
 EXPOSE 8000
 
 # 健康检查（使用 PORT 环境变量）
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD sh -c "python3 -c \"import urllib.request; import os; port=os.getenv('PORT', '8000'); urllib.request.urlopen(f'http://localhost:{port}/docs')\"" || exit 1
+# 增加启动等待时间，使用 /health 端点
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
+    CMD sh -c "python3 -c \"import urllib.request; import os; port=os.getenv('PORT', '8000'); urllib.request.urlopen(f'http://localhost:{port}/health')\"" || exit 1
 
 # 启动命令（使用 shell 形式以支持环境变量扩展）
 # PORT 环境变量由 Koyeb 在运行时设置
