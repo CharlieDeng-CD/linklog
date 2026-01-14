@@ -1,6 +1,6 @@
 # LinkLog v2 - Dockerfile (多阶段构建)
 # 阶段 1: 构建 Next.js 前端
-FROM node:18-alpine AS frontend-builder
+FROM node:20-alpine AS frontend-builder
 
 WORKDIR /app/frontend
 
