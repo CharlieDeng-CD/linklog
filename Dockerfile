@@ -24,7 +24,8 @@ COPY frontend/ .
 RUN rm -rf .next out || true
 
 # 构建（单线程，避免并发写入）
-RUN npm run build
+# 增加 Node.js 内存限制以避免构建失败
+RUN NODE_OPTIONS="--max-old-space-size=2048" npm run build
 
 # 阶段 2: Python 后端运行时
 FROM python:3.11-slim
