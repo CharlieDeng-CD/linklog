@@ -58,6 +58,7 @@ RUN pip install --upgrade pip && \
 
 # 从构建阶段复制前端构建产物（静态导出）
 COPY --from=frontend-builder /app/frontend/out ./frontend/out
+# 复制public目录（如果存在）
 COPY --from=frontend-builder /app/frontend/public ./frontend/public
 
 # 复制后端代码
