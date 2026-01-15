@@ -1,5 +1,5 @@
-# LinkLog v2 - Dockerfile (简化版用于测试)
-# 阶段 1: 构建 Next.js 前端（只保留步骤1-7）
+# LinkLog v2 - Dockerfile (多阶段构建)
+# 阶段 1: 构建 Next.js 前端
 FROM node:20-alpine AS frontend-builder
 
 WORKDIR /app/frontend
@@ -7,7 +7,9 @@ WORKDIR /app/frontend
 # 设置环境变量避免并发写入问题
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+# 禁用 Next.js 的并发优化，避免写入冲突
 ENV NEXT_PRIVATE_STANDALONE=true
+# 增加 Node.js 内存限制以避免构建失败
 ENV NODE_OPTIONS=--max-old-space-size=2048
 
 # 复制前端依赖文件
@@ -19,22 +21,21 @@ RUN npm ci --legacy-peer-deps
 # 复制前端源代码
 COPY frontend/ .
 
+# 构建 Next.js 应用（输出静态文件）
 # 清理可能的旧构建产物
 RUN rm -rf .next out || true
 
-# 测试步骤7：添加调试信息
-RUN echo "Step 6 completed successfully"
-RUN echo "Starting Step 7: Next.js build preparation..."
-RUN pwd
-RUN ls -la
-RUN echo "Step 7 preparation completed"
+# 构建（单线程，避免并发写入）
+# 将多行命令拆分为独立步骤，确保每个步骤都能正确执行并输出日志
+RUN echo "Starting Next.js build..."
+RUN npm run build
+RUN echo "Build completed successfully"
+RUN ls -la out/ || echo "Warning: out directory not found"
 
-# 注意：这里暂时不执行npm run build，先确认步骤7能正常执行
-# RUN npm run build
-
-# 阶段 2: Python 后端运行时（简化版）
+# 阶段 2: Python 后端运行时
 FROM python:3.11-slim
 
+# 设置工作目录
 WORKDIR /app
 
 # 设置环境变量
@@ -56,9 +57,9 @@ RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
 # 从构建阶段复制前端构建产物（静态导出）
-# 注意：由于没有执行npm run build，这里会失败，但我们可以先测试步骤7是否执行
-COPY --from=frontend-builder /app/frontend/out ./frontend/out || echo "out directory not found (expected in test)"
-COPY --from=frontend-builder /app/frontend/public ./frontend/public || echo "public directory not found (expected in test)"
+COPY --from=frontend-builder /app/frontend/out ./frontend/out
+# 复制public目录（如果存在）
+COPY --from=frontend-builder /app/frontend/public ./frontend/public
 
 # 复制后端代码
 COPY server.py .
@@ -74,9 +75,10 @@ USER appuser
 EXPOSE 8000
 
 # 健康检查（使用 PORT 环境变量）
+# 增加启动等待时间，使用 /health 端点
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
     CMD sh -c "python3 -c \"import urllib.request; import os; port=os.getenv('PORT', '8000'); urllib.request.urlopen(f'http://localhost:{port}/health')\"" || exit 1
 
 # 启动命令（使用 shell 形式以支持环境变量扩展）
+# PORT 环境变量由 Koyeb 在运行时设置
 CMD sh -c "uvicorn server:app --host 0.0.0.0 --port ${PORT:-8000}"
-
