@@ -25,12 +25,11 @@ RUN rm -rf .next out || true
 
 # 构建（单线程，避免并发写入）
 # 增加 Node.js 内存限制以避免构建失败
-# 使用 set -e 确保错误会被捕获，并输出详细日志
-RUN set -e && \
-    echo "Starting Next.js build..." && \
-    NODE_OPTIONS="--max-old-space-size=2048" npm run build && \
-    echo "Build completed successfully" && \
-    ls -la out/ || echo "Warning: out directory not found"
+# 将多行命令拆分为独立步骤，确保每个步骤都能正确执行并输出日志
+RUN echo "Starting Next.js build..."
+RUN NODE_OPTIONS="--max-old-space-size=2048" npm run build
+RUN echo "Build completed successfully"
+RUN ls -la out/ || echo "Warning: out directory not found"
 
 # 阶段 2: Python 后端运行时
 FROM python:3.11-slim
