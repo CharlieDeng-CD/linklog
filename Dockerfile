@@ -9,6 +9,8 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 # 禁用 Next.js 的并发优化，避免写入冲突
 ENV NEXT_PRIVATE_STANDALONE=true
+# 增加 Node.js 内存限制以避免构建失败
+ENV NODE_OPTIONS=--max-old-space-size=2048
 
 # 复制前端依赖文件
 COPY frontend/package*.json ./
@@ -24,10 +26,9 @@ COPY frontend/ .
 RUN rm -rf .next out || true
 
 # 构建（单线程，避免并发写入）
-# 增加 Node.js 内存限制以避免构建失败
 # 将多行命令拆分为独立步骤，确保每个步骤都能正确执行并输出日志
 RUN echo "Starting Next.js build..."
-RUN NODE_OPTIONS="--max-old-space-size=2048" npm run build
+RUN npm run build
 RUN echo "Build completed successfully"
 RUN ls -la out/ || echo "Warning: out directory not found"
 
