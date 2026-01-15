@@ -56,9 +56,13 @@ RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
 # 从构建阶段复制前端构建产物（静态导出）
-# 注意：由于没有执行npm run build，这里会失败，但我们可以先测试步骤7是否执行
-COPY --from=frontend-builder /app/frontend/out ./frontend/out || echo "out directory not found (expected in test)"
-COPY --from=frontend-builder /app/frontend/public ./frontend/public || echo "public directory not found (expected in test)"
+# 注意：由于没有执行npm run build，out目录不存在，这里会失败
+# 但我们可以先测试步骤7是否执行，如果步骤7能执行，再恢复完整的构建
+# 暂时注释掉这些COPY命令，先测试步骤7
+# COPY --from=frontend-builder /app/frontend/out ./frontend/out
+# COPY --from=frontend-builder /app/frontend/public ./frontend/public
+RUN mkdir -p ./frontend/out ./frontend/public
+RUN echo "Skipping COPY from frontend-builder for testing purposes"
 
 # 复制后端代码
 COPY server.py .
