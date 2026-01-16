@@ -5,7 +5,8 @@ FROM node:20-alpine AS frontend-builder
 WORKDIR /app/frontend
 
 # 设置环境变量避免并发写入问题
-ENV NODE_ENV=production
+# 注意：构建时需要devDependencies（tailwindcss等），所以不设置NODE_ENV=production
+# 只在运行时设置NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 # 禁用 Next.js 的并发优化，避免写入冲突
 ENV NEXT_PRIVATE_STANDALONE=true
@@ -15,7 +16,8 @@ ENV NODE_OPTIONS=--max-old-space-size=2048
 # 复制前端依赖文件
 COPY frontend/package*.json ./
 
-# 安装前端依赖（构建需要 devDependencies）
+# 安装前端依赖（构建需要 devDependencies，如tailwindcss）
+# 不设置NODE_ENV=production，这样npm ci会安装devDependencies
 RUN npm ci --legacy-peer-deps
 
 # 复制前端源代码
