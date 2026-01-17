@@ -178,11 +178,11 @@ export default function GraphCanvas({
 
       const timer = setTimeout(async () => {
         // 打开侧边栏（使用缓存或调用 API）
-        setSelectedNode(node);
-        setSidebarOpen(true);
+      setSelectedNode(node);
+      setSidebarOpen(true);
 
-        // 如果节点还未展开，则展开它
-        if (!node.data.expanded && !expandingNodeId) {
+      // 如果节点还未展开，则展开它
+      if (!node.data.expanded && !expandingNodeId) {
           await expandNode(node);
         }
         
@@ -227,100 +227,100 @@ export default function GraphCanvas({
       }
 
       // 缓存不存在，调用 API
-      setExpandingNodeId(node.id);
-      setLoading(true);
-      
-      try {
-        const nodePath = [originalGoal, node.data.label];
-        const existingNodes = nodes.map((n) => ({
-          label: n.data.label,
-          id: n.id,
-        }));
+        setExpandingNodeId(node.id);
+        setLoading(true);
+        
+        try {
+          const nodePath = [originalGoal, node.data.label];
+          const existingNodes = nodes.map((n) => ({
+            label: n.data.label,
+            id: n.id,
+          }));
 
-        const response = await fetch('http://localhost:8003/api/v2/expand', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            original_goal: originalGoal,
-            node_id: node.id,
-            node_label: node.data.label,
-            node_path: nodePath,
-            node_category: node.data.category,
-            existing_nodes: existingNodes,
-          }),
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`API 错误 ${response.status}: ${errorText.substring(0, 100)}`);
-        }
-
-        const contentType = response.headers.get('content-type');
-        if (!contentType || !contentType.includes('application/json')) {
-          const text = await response.text();
-          throw new Error(`响应不是 JSON: ${text.substring(0, 100)}`);
-        }
-
-        const result = await response.json();
-
-        if (result.success && result.data.nodes.length > 0) {
-          // 添加新节点（临时位置）
-          const newNodes: Node[] = result.data.nodes.map((newNode: any) => ({
-            id: newNode.id,
-            type: 'customNode',
-            position: { x: 0, y: 0 }, // 临时位置，后续自动布局
-            data: {
-              label: newNode.label,
-              category: newNode.category || 'action',
-              description: newNode.description,
-              expanded: false,
+          const response = await fetch('/api/v2/expand', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
             },
-          }));
+            body: JSON.stringify({
+              original_goal: originalGoal,
+              node_id: node.id,
+              node_label: node.data.label,
+              node_path: nodePath,
+              node_category: node.data.category,
+              existing_nodes: existingNodes,
+            }),
+          });
 
-          // 添加新边
-          const newEdges: Edge[] = result.data.edges.map((edge: any) => ({
-            id: `e${edge.source}-${edge.target}`,
-            source: edge.source,
-            target: edge.target,
-          }));
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`API 错误 ${response.status}: ${errorText.substring(0, 100)}`);
+          }
+
+          const contentType = response.headers.get('content-type');
+          if (!contentType || !contentType.includes('application/json')) {
+            const text = await response.text();
+            throw new Error(`响应不是 JSON: ${text.substring(0, 100)}`);
+          }
+
+          const result = await response.json();
+
+          if (result.success && result.data.nodes.length > 0) {
+            // 添加新节点（临时位置）
+            const newNodes: Node[] = result.data.nodes.map((newNode: any) => ({
+              id: newNode.id,
+              type: 'customNode',
+              position: { x: 0, y: 0 }, // 临时位置，后续自动布局
+              data: {
+                label: newNode.label,
+                category: newNode.category || 'action',
+                description: newNode.description,
+                expanded: false,
+              },
+            }));
+
+            // 添加新边
+            const newEdges: Edge[] = result.data.edges.map((edge: any) => ({
+              id: `e${edge.source}-${edge.target}`,
+              source: edge.source,
+              target: edge.target,
+            }));
 
           // 保存到缓存
           const newCache = new Map(expandedNodesCache);
           newCache.set(node.id, { nodes: newNodes, edges: newEdges });
           setExpandedNodesCache(newCache);
 
-          // 记录子节点关系
-          const childIds = new Set(newNodes.map(n => n.id));
-          const newNodeChildren = new Map(nodeChildren);
-          newNodeChildren.set(node.id, childIds);
-          setNodeChildren(newNodeChildren);
+            // 记录子节点关系
+            const childIds = new Set(newNodes.map(n => n.id));
+            const newNodeChildren = new Map(nodeChildren);
+            newNodeChildren.set(node.id, childIds);
+            setNodeChildren(newNodeChildren);
 
-          // 合并所有节点和边，然后重新布局
-          const allNodes = [...nodes, ...newNodes];
-          const allEdges = [...edges, ...newEdges];
-          
-          // 标记节点为已展开
-          const updatedNodes = allNodes.map((n) =>
-            n.id === node.id ? { ...n, data: { ...n.data, expanded: true } } : n
-          );
+            // 合并所有节点和边，然后重新布局
+            const allNodes = [...nodes, ...newNodes];
+            const allEdges = [...edges, ...newEdges];
+            
+            // 标记节点为已展开
+            const updatedNodes = allNodes.map((n) =>
+              n.id === node.id ? { ...n, data: { ...n.data, expanded: true } } : n
+            );
 
-          // 自动布局
-          const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
-            updatedNodes,
-            allEdges
-          );
+            // 自动布局
+            const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
+              updatedNodes,
+              allEdges
+            );
 
-          setNodes(layoutedNodes);
-          setEdges(layoutedEdges);
-        }
-      } catch (error) {
-        console.error('展开节点失败:', error);
-        alert('展开节点失败，请重试');
-      } finally {
-        setExpandingNodeId(null);
-        setLoading(false);
+            setNodes(layoutedNodes);
+            setEdges(layoutedEdges);
+          }
+        } catch (error) {
+          console.error('展开节点失败:', error);
+          alert('展开节点失败，请重试');
+        } finally {
+          setExpandingNodeId(null);
+          setLoading(false);
       }
     },
     [originalGoal, nodes, edges, nodeChildren, expandedNodesCache, setNodes, setEdges]

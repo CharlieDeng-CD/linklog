@@ -37,7 +37,7 @@ export default function ContextSidebar({
       setLoading(true);
       try {
         const nodePath = [originalGoal, node.data.label];
-        const response = await fetch('http://localhost:8003/api/v2/context', {
+        const response = await fetch('/api/v2/context', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

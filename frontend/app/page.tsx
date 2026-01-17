@@ -14,7 +14,7 @@ export default function Home() {
     
     // 调用后端 API 生成初始图谱
     try {
-      const response = await fetch('http://localhost:8003/api/v2/init', {
+      const response = await fetch('/api/v2/init', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
