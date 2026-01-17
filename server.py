@@ -100,6 +100,74 @@ class AnalyzeRequest(BaseModel):
 
 # ==================== 工具函数 ====================
 
+def parse_node_detail_json(content: str) -> dict:
+    """
+    专门用于解析节点详情的 JSON（Mode C）
+    更强的容错性，处理各种边界情况
+    """
+    original_content = content
+    json_content = content.strip()
+    
+    # 步骤 1: 提取 JSON 代码块（如果有）
+    if "```json" in json_content:
+        json_content = json_content.split("```json")[1].split("```")[0].strip()
+    elif "```" in json_content:
+        parts = json_content.split("```")
+        if len(parts) >= 3:
+            json_content = parts[1].strip()
+            if json_content.startswith("json"):
+                json_content = json_content[4:].strip()
+    
+    # 步骤 2: 尝试直接解析
+    try:
+        return json.loads(json_content)
+    except json.JSONDecodeError:
+        pass
+    
+    # 步骤 3: 尝试修复后解析
+    try:
+        fixed_content = fix_json_string(json_content)
+        return json.loads(fixed_content)
+    except Exception:
+        pass
+    
+    # 步骤 4: 尝试从原始内容提取 JSON 对象（使用正则）
+    try:
+        json_match = re.search(r'\{.*\}', original_content, re.DOTALL)
+        if json_match:
+            extracted_json = json_match.group(0)
+            extracted_json = fix_json_string(extracted_json)
+            return json.loads(extracted_json)
+    except Exception:
+        pass
+    
+    # 步骤 5: 尝试更宽松的提取（允许不完整的 JSON）
+    try:
+        # 查找第一个 { 开始，尝试找到匹配的 }
+        start_idx = original_content.find('{')
+        if start_idx != -1:
+            brace_count = 0
+            end_idx = start_idx
+            for i in range(start_idx, len(original_content)):
+                if original_content[i] == '{':
+                    brace_count += 1
+                elif original_content[i] == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_idx = i + 1
+                        break
+            
+            if end_idx > start_idx:
+                extracted_json = original_content[start_idx:end_idx]
+                extracted_json = fix_json_string(extracted_json)
+                return json.loads(extracted_json)
+    except Exception:
+        pass
+    
+    # 步骤 6: 如果所有方法都失败，返回 None
+    return None
+
+
 def fix_json_string(json_str: str) -> str:
     """
     修复常见的 JSON 格式问题
@@ -915,6 +983,36 @@ class V2InitRequest(BaseModel):
     """v2 初始图谱生成请求"""
     goal: str
 
+# ==================== v3 API Endpoints ====================
+
+class V3InitRequest(BaseModel):
+    """v3 初始图谱生成请求（支持双引擎：Mode A/B）"""
+    goal: str
+    context: Optional[str] = None  # 如果提供，触发 Mode B（Gap Analysis），否则触发 Mode A（Standard Exploration）
+
+class V3NodeDetailRequest(BaseModel):
+    """v3 节点详情请求（Mode C）"""
+    goal: str
+    context: Optional[str] = None  # 用户背景知识（可选）
+    node_label: str  # 当前节点标签
+    node_id: Optional[str] = None  # 节点ID（可选）
+
+class V3ChatRequest(BaseModel):
+    """v3 聊天请求"""
+    goal: str
+    context: Optional[str] = None  # 用户背景知识（可选）
+    node_label: str  # 当前节点标签
+    node_id: Optional[str] = None  # 节点ID（可选）
+    question: str  # 用户问题
+    conversation_history: Optional[List[Dict]] = None  # 对话历史（可选）
+
+class V3IntegrateNodeRequest(BaseModel):
+    """v3 关联新概念请求"""
+    goal: str
+    context: Optional[str] = None
+    existing_nodes: List[Dict]  # 现有节点的列表，每个节点包含 id, label, category, level 等
+    new_concept: str  # 新发现的概念名称
+
 class V2ExpandRequest(BaseModel):
     """v2 节点展开请求"""
     original_goal: str
@@ -922,6 +1020,7 @@ class V2ExpandRequest(BaseModel):
     node_label: str
     node_path: List[str]  # 从根到当前节点的路径
     node_category: str  # goal/action/prerequisite
+    node_level: Optional[int] = None  # 节点层级：0=目标, 1=核心支柱, 2=基础依赖
     existing_nodes: List[Dict]  # 已有节点（用于去重）
 
 class V2ContextRequest(BaseModel):
@@ -1140,9 +1239,25 @@ async def v2_expand_node(request: V2ExpandRequest):
     print(f"   └─ 节点ID: {request.node_id}")
     print(f"   └─ 节点标签: {request.node_label}")
     print(f"   └─ 节点类型: {request.node_category}")
+    print(f"   └─ 节点层级: {request.node_level if request.node_level is not None else '未知'}")
     print(f"   └─ 路径: {' → '.join(request.node_path)}")
     print(f"   └─ 原始目标: {request.original_goal}")
     print(f"   └─ 已有节点数: {len(request.existing_nodes)}")
+    
+    # ========== 1.5. System 动作：检查层级限制 ==========
+    if request.node_level == 0:
+        print("\n[System] ⛔ Level 0 节点（目标节点）不允许展开")
+        raise HTTPException(
+            status_code=400,
+            detail="Level 0 节点（目标节点）不允许展开。初始图谱已经包含了完整的结构，展开目标节点会导致与已有节点重复。"
+        )
+    elif request.node_level == 2:
+        print("\n[System] ⛔ Level 2 节点不允许展开（已是最底层）")
+        raise HTTPException(
+            status_code=400,
+            detail="Level 2 节点（基础依赖层）不允许展开。根据 v3 架构，Level 2 已是最底层。"
+        )
+    # Level 3 (known) 节点可以展开，因为它们是已知知识的起点，可以展开相关细节
     
     # 构建上下文
     existing_labels = [n.get('label', '') for n in request.existing_nodes]
@@ -1154,6 +1269,9 @@ async def v2_expand_node(request: V2ExpandRequest):
 已有节点（避免重复）：
 {', '.join(existing_labels[:10])}
 """
+    
+    # 确定子节点的层级：如果父节点是 Level 1，则子节点是 Level 2
+    child_level = 2 if request.node_level == 1 else (request.node_level + 1 if request.node_level is not None else None)
     
     prompt = f"""你是一位技术导师专家。用户想要学习"{request.original_goal}"，现在需要展开节点"{request.node_label}"。
 
@@ -1167,7 +1285,8 @@ async def v2_expand_node(request: V2ExpandRequest):
 3. 优先识别 prerequisite 类型的节点（用户可能不知道的知识）
 4. **必须为所有子节点创建边**：每个子节点都应该至少有一条边连接到父节点"{request.node_label}"（source: "{request.node_id}"），确保图谱的完整性和逻辑连贯性
 5. 边的创建要基于知识的逻辑关系：依赖关系、先后顺序、包含关系等，reason 字段要清晰说明为什么需要这个连接
-6. 返回严格的 JSON 格式
+6. **层级限制**：根据 v3 架构，图谱严格限制为 3 层。如果父节点是 Level 1，子节点必须是 Level 2（最底层）。如果父节点已经是 Level 2，则不允许展开。
+7. 返回严格的 JSON 格式
 
 **返回格式：**
 {{
@@ -1176,6 +1295,7 @@ async def v2_expand_node(request: V2ExpandRequest):
       "id": "nX",
       "label": "子节点名称",
       "category": "goal|action|prerequisite",
+      "level": {child_level if child_level is not None else 2},
       "description": "结合原始目标解释为什么需要这个"
     }}
   ],
@@ -1466,6 +1586,759 @@ async def v2_get_context(request: V2ContextRequest):
         import traceback
         print(f"   └─ 错误详情:\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"获取上下文失败: {str(e)}")
+
+
+# ==================== v3 API Endpoints ====================
+
+@app.post("/api/v3/init")
+async def v3_init_graph(request: V3InitRequest):
+    """
+    v3 版本：生成初始图谱（双引擎架构）
+    - Mode A (Standard Exploration): context 为空时，全量生成
+    - Mode B (Gap Analysis): context 有值时，差量生成（桥接模式）
+    """
+    print("\n" + "="*80)
+    print("🚀 LinkLog v3 - 生成初始图谱（双引擎架构）")
+    print("="*80)
+    
+    # 判断模式
+    mode = "Mode B (Gap Analysis)" if request.context else "Mode A (Standard Exploration)"
+    print(f"\n[System] 📊 检测到模式: {mode}")
+    print(f"   └─ Goal: {request.goal}")
+    if request.context:
+        print(f"   └─ Context: {request.context}")
+    else:
+        print(f"   └─ Context: 无（全量模式）")
+    
+    # ========== 1. Agent 动作：接收用户输入 ==========
+    print("\n[Agent] 📥 接收用户目标")
+    request_json = json.dumps({
+        "goal": request.goal,
+        "context": request.context
+    }, ensure_ascii=False, indent=2)
+    print(f"   └─ 请求数据:\n{request_json}")
+    
+    # ========== 2. System 动作：构建 Prompt（根据模式选择）==========
+    print("\n[System] 🔧 构建 AI Prompt")
+    
+    if request.context:
+        # Mode B: Gap Analysis (差量模式)
+        system_prompt = """你是一位"桥接学习"专家。你的任务是根据用户已有的知识背景，创建一条精准的学习路径来填补知识缺口。
+必须使用简体中文输出。"""
+        
+        user_prompt = f"""### USER INPUT
+- **Goal:** {request.goal}
+- **Current Context (Already Knows):** {request.context}
+
+### 核心布局逻辑 (严格 4 层结构)
+生成的图谱必须严格遵循以下层级：
+
+1. **Level 0 (最终目标)**: 用户的输入目标。它是图谱的终点（在视觉上处于最下方）。
+2. **Level 1 (核心支柱)**: 达成目标必须掌握的核心模块。直接指向 Level 0。
+3. **Level 2 (进阶概念)**: 建立在已知知识之上的新概念。指向 Level 1。
+4. **Level 3 (基石 - 已知知识)**: 从用户的背景中挑选出与目标最相关的 2-3 个核心知识点。它们作为学习的起点，指向 Level 2。
+
+### 差量分析逻辑
+1. **保留关键已知**: 不要过滤掉用户背景中最重要的关键词。例如：如果用户提到 "npm" 且要学 "Cursor"，npm 应该作为 Level 3 的 "known" 节点出现，并连接到相关的 Level 2 节点（如 "包管理" 或 "插件系统"）。
+2. **建立连接路径**: 必须为每个 Level 3 (known) 节点创建至少一条边，连接到相关的 Level 2 节点，展示"已知知识如何支撑新知识"。
+3. **识别桥接点**: 找出目标中与用户背景知识对应的概念。标记为 "bridge"（通常在 Level 1 或 Level 2）。
+4. **识别新概念**: 列出对用户来说全新的概念范式。标记为 "new_concept"（通常在 Level 1 或 Level 2）。
+5. **安全网**: 如果某个基础概念是常见陷阱，可以包含但标记为 "review"（Level 2）。
+
+### 规则约束
+1. **层级结构**: 必须包含 Level 3 (已知) -> Level 2 (进阶) -> Level 1 (核心) -> Level 0 (目标)。
+2. **逻辑方向**: 所有的边必须从"前置"指向"后置"（L3 -> L2 -> L1 -> L0）。
+3. **节点数量**: 总节点数严格控制在 12-15 个之间（包含 2-3 个 known 节点）。
+4. **命名规范**: 节点标签 (label) 必须精炼，控制在 3-5 个中文汉字。
+5. **已知节点要求**: Level 3 的 known 节点必须从用户输入的 context 中提取，不能凭空创造。
+
+### JSON OUTPUT FORMAT (STRICT)
+Output ONLY raw JSON. No markdown backticks, no conversational text.
+{{
+  "nodes": [
+    {{
+      "id": "string (unique)",
+      "label": "简短中文名称(3-5字)",
+      "type": "target" | "bridge" | "new_concept" | "review" | "known",
+      "level": 0 | 1 | 2 | 3,
+      "description": "结合用户背景的中文解释"
+    }}
+  ],
+  "edges": [
+    {{ "source": "上层节点id", "target": "下层节点id", "label": "连接" }}
+  ]
+}}
+
+### NODE TYPE DEFINITIONS
+- "target": 最终目标节点（Level 0，只有 1 个）。
+- "bridge": 连接旧知识到新知识的桥接概念（Level 1 或 Level 2，例如："虚拟DOM"）。
+- "new_concept": 用户完全没接触过的新概念（Level 1 或 Level 2）。
+- "review": 用户应该知道但建议复习的基础概念（Level 2，避免坏习惯）。
+- "known": 用户已经掌握的知识点（Level 3，从用户输入的 context 中提取，必须连接到 Level 2）。
+
+### 重要提示
+- Level 0 节点必须只有一个，且 type 必须是 "target"。
+- Level 3 (known) 节点必须从用户输入的 context 中提取，不能创造用户没提到的知识。
+- 每个 Level 3 (known) 节点必须至少有一条边连接到 Level 2 节点，展示学习路径。
+- 所有 Level 2 节点必须通过 Level 1 节点连接到 Level 0，不能直接连接 Level 0。
+- 确保边的方向正确：source 是上层（前置），target 是下层（后置）。
+- Level 3 节点必须来源于用户的 Context。
+- 确保有清晰的路径从 Level 3 延伸到 Level 0。"""
+    else:
+        # Mode A: Standard Exploration (全量模式)
+        system_prompt = """你是一位专业的技术课程架构师。你的任务是生成一个逻辑严密、层级清晰的"知识依赖图谱"。
+必须使用简体中文输出。"""
+        
+        user_prompt = f"""### USER INPUT
+- **Goal:** {request.goal}
+
+### 核心布局逻辑 (严格 3 层结构)
+生成的图谱必须严格遵循以下层级，严禁超过 3 层：
+
+1. **Level 0 (最终目标)**: 用户的输入目标。它是图谱的终点（在视觉上处于最下方）。只有 1 个节点。
+2. **Level 1 (核心支柱)**: 达成目标必须掌握的 3-4 个核心模块。它们直接指向 Level 0。
+3. **Level 2 (基础依赖)**: 针对每个 Level 1 节点，列出 2-3 个最关键的前置基础。它们指向对应的 Level 1。
+
+### 规则约束
+1. **严格限深**: 深度必须严格控制在 3 层（Level 0/1/2）。不要生成无限嵌套的小细节。
+2. **逻辑方向**: 所有的边必须从"前置知识"指向"后置知识"（即：L2 -> L1 -> L0）。
+   - 正确示例：[JavaScript基础] -> [React框架] -> [个人博客项目]
+3. **节点数量**: 总节点数严格控制在 10-12 个之间，确保画面清爽、不凌乱。
+4. **命名规范**: 节点标签 (label) 必须精炼，控制在 3-5 个中文汉字。
+5. **去重**: 确保没有含义重复的节点。
+
+### JSON OUTPUT FORMAT (STRICT)
+You must output ONLY raw JSON. No markdown backticks, no conversational text.
+{{
+  "nodes": [
+    {{
+      "id": "string (unique)",
+      "label": "简短中文名称(3-5字)",
+      "type": "target" | "concept" | "prerequisite",
+      "level": 0 | 1 | 2,
+      "description": "结合目标的中文解释"
+    }}
+  ],
+  "edges": [
+    {{ "source": "上层节点id", "target": "下层节点id", "label": "依赖" }}
+  ]
+}}
+
+### NODE TYPE DEFINITIONS
+- "target": 最终目标节点（Level 0，只有 1 个）。
+- "concept": 核心学习步骤（Level 1）。
+- "prerequisite": 前置基础知识（Level 2）。
+
+### 重要提示
+- Level 0 节点必须只有一个，且 type 必须是 "target"。
+- 所有 Level 2 节点必须通过 Level 1 节点连接到 Level 0，不能直接连接 Level 0。
+- 确保边的方向正确：source 是上层（前置），target 是下层（后置）。"""
+    
+    print(f"   └─ 模式: {mode}")
+    print(f"   └─ System Prompt 长度: {len(system_prompt)} 字符")
+    print(f"   └─ User Prompt 长度: {len(user_prompt)} 字符")
+    
+    try:
+        # ========== 3. System 动作：准备 API 调用 ==========
+        print("\n[System] 🔧 准备 AI API 调用")
+        api_params = {
+            "model": "grok-4-fast",
+            "temperature": 0.3,
+            "max_tokens": 2000
+        }
+        print(f"   └─ 模型: {api_params['model']}")
+        print(f"   └─ 温度: {api_params['temperature']}")
+        print(f"   └─ 最大Token: {api_params['max_tokens']}")
+        
+        # ========== 4. System 动作：调用 AI（异步）==========
+        import time
+        start_time = time.time()
+        
+        # 详细打印请求信息
+        log_ai_request(
+            endpoint_name="v3_init",
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=api_params["model"],
+            temperature=api_params["temperature"],
+            max_tokens=api_params["max_tokens"]
+        )
+        
+        # 使用带重试的 API 调用
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ]
+        
+        response = await call_ai_with_retry(
+            client=client,
+            model=api_params["model"],
+            messages=messages,
+            temperature=api_params["temperature"],
+            max_tokens=api_params["max_tokens"],
+            max_retries=3,
+            retry_delay=2.0,
+            disable_tools=True
+        )
+        
+        elapsed_time = time.time() - start_time
+        
+        # ========== 5. Agent 响应：AI 返回结果 ==========
+        message = response.choices[0].message
+        content = message.content if message.content else ""
+        usage = response.usage if hasattr(response, 'usage') else None
+        
+        # 详细打印响应信息
+        log_ai_response(
+            endpoint_name="v3_init",
+            response_content=content,
+            usage=usage,
+            show_full_response=True
+        )
+        
+        print(f"⏱️  请求耗时: {elapsed_time:.2f}秒")
+        
+        # ========== 6. System 动作：解析响应 ==========
+        print("\n[System] 🔍 解析 AI 响应")
+        original_content = content
+        
+        # 使用改进的 JSON 解析函数
+        try:
+            graph_data = parse_json_with_fallback(content)
+            print(f"   └─ JSON 解析成功")
+        except Exception as e:
+            print(f"\n[System] ❌ JSON 解析完全失败: {str(e)}")
+            print(f"   └─ 原始内容预览:\n{original_content[:500]}...")
+            raise HTTPException(
+                status_code=500,
+                detail=f"无法解析 AI 返回的 JSON。错误: {str(e)}。请重试。"
+            )
+        
+        # 验证数据结构
+        if "nodes" not in graph_data:
+            graph_data["nodes"] = []
+        if "edges" not in graph_data:
+            graph_data["edges"] = []
+        
+        # ========== 7. System 动作：检查节点连接 ==========
+        print("\n[System] 🔗 检查节点连接情况")
+        nodes = graph_data["nodes"]
+        edges = graph_data["edges"]
+        
+        if len(nodes) > 0:
+            connected_node_ids = set()
+            for edge in edges:
+                connected_node_ids.add(edge.get("source"))
+                connected_node_ids.add(edge.get("target"))
+            
+            all_node_ids = {node.get("id") for node in nodes}
+            isolated_node_ids = all_node_ids - connected_node_ids
+            
+            if isolated_node_ids:
+                isolated_labels = [node.get("label", node.get("id")) for node in nodes if node.get("id") in isolated_node_ids]
+                print(f"   ⚠️  发现 {len(isolated_node_ids)} 个孤立节点: {isolated_labels}")
+            else:
+                print(f"   ✅ 所有节点都已连接")
+        
+        # ========== 8. System 动作：返回结果 ==========
+        print("\n[System] 📤 返回处理结果")
+        print(f"   └─ 节点数量: {len(graph_data['nodes'])}")
+        print(f"   └─ 边数量: {len(graph_data['edges'])}")
+        print(f"   └─ 节点列表:")
+        for i, node in enumerate(graph_data['nodes'], 1):
+            node_type = node.get('type', node.get('category', 'unknown'))
+            print(f"      {i}. [{node_type}] {node.get('label', 'N/A')}")
+        
+        response_data = {
+            "success": True,
+            "data": graph_data,
+            "original_goal": request.goal,
+            "context": request.context,
+            "mode": mode
+        }
+        print(f"\n[System] ✅ 请求处理完成 (总耗时: {elapsed_time:.2f}秒)")
+        print("="*80 + "\n")
+        
+        return response_data
+    except Exception as e:
+        print(f"\n[System] ❌ 错误: {str(e)}")
+        import traceback
+        print(f"   └─ 错误详情:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"生成初始图谱失败: {str(e)}")
+
+
+@app.post("/api/v3/node-detail")
+async def v3_get_node_detail(request: V3NodeDetailRequest):
+    """
+    v3 版本：获取节点详情（Mode C - Node Explainer）
+    基于用户背景知识，提供类比解释和具体行动建议
+    """
+    print("\n" + "="*80)
+    print("📖 LinkLog v3 - 获取节点详情（Mode C）")
+    print("="*80)
+    
+    # ========== 1. Agent 动作：接收节点详情请求 ==========
+    print("\n[Agent] 📥 接收节点详情请求")
+    print(f"   └─ Goal: {request.goal}")
+    print(f"   └─ Context: {request.context or '无'}")
+    print(f"   └─ Node: {request.node_label}")
+    
+    # ========== 2. System 动作：构建 Prompt ==========
+    print("\n[System] 🔧 构建 AI Prompt (Mode C)")
+    
+    system_prompt = """You are an intelligent Technical Tutor. The user is exploring a knowledge graph.
+Your task is to explain a specific concept, keeping in mind their learning goal and their background. IMPORTANT: All output must be in Chinese (简体中文)."""
+    
+    # 根据是否有 context 构建不同的 user prompt
+    if request.context:
+        user_prompt = f"""### USER INPUT
+- **Goal:** {request.goal}
+- **Context:** {request.context}
+- **Current Node:** {request.node_label}
+
+### INSTRUCTIONS
+1. **Definition:** Provide a clear, jargon-free definition (1 sentence).
+2. **The "Bridge" (Analogy):** Explain this concept by comparing it to something from their background.
+   - *Example:* "Think of React Props like HTML attributes, but for custom components."
+3. **Why it matters:** Why is this node a blocker for the main goal?
+4. **Action:** Give one concrete thing to do (run a command, write a function).
+
+### JSON OUTPUT FORMAT (STRICT)
+Output ONLY raw JSON. No markdown backticks, no conversational text.
+{{
+  "title": "{request.node_label}",
+  "definition": "...",
+  "analogy": "string (compare to something from their background)",
+  "importance": "...",
+  "action_item": "code snippet or command",
+  "resource_keywords": ["keyword1", "keyword2"]
+}}"""
+    else:
+        user_prompt = f"""### USER INPUT
+- **Goal:** {request.goal}
+- **Context:** (empty)
+- **Current Node:** {request.node_label}
+
+### INSTRUCTIONS
+1. **Definition:** Provide a clear, jargon-free definition (1 sentence).
+2. **The "Bridge" (Analogy):** Use a real-world analogy to explain this concept.
+   - *Example:* "Think of a database like a filing cabinet, where each drawer is a table."
+3. **Why it matters:** Why is this node a blocker for the main goal?
+4. **Action:** Give one concrete thing to do (run a command, write a function).
+
+### JSON OUTPUT FORMAT (STRICT)
+Output ONLY raw JSON. No markdown backticks, no conversational text.
+{{
+  "title": "{request.node_label}",
+  "definition": "...",
+  "analogy": "string (real-world analogy)",
+  "importance": "...",
+  "action_item": "code snippet or command",
+  "resource_keywords": ["keyword1", "keyword2"]
+}}"""
+    
+    print(f"   └─ System Prompt 长度: {len(system_prompt)} 字符")
+    print(f"   └─ User Prompt 长度: {len(user_prompt)} 字符")
+    print(f"   └─ 模式: {'有背景类比' if request.context else '通用类比'}")
+    
+    try:
+        # ========== 3. System 动作：准备 API 调用 ==========
+        print("\n[System] 🔧 准备 AI API 调用")
+        api_params = {
+            "model": "grok-4-fast",
+            "temperature": 0.4,  # 稍高一点，让解释更生动
+            "max_tokens": 800
+        }
+        print(f"   └─ 模型: {api_params['model']}")
+        print(f"   └─ 温度: {api_params['temperature']}")
+        print(f"   └─ 最大Token: {api_params['max_tokens']}")
+        
+        # ========== 4. System 动作：调用 AI（异步）==========
+        import time
+        start_time = time.time()
+        
+        # 详细打印请求信息
+        log_ai_request(
+            endpoint_name="v3_node_detail",
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=api_params["model"],
+            temperature=api_params["temperature"],
+            max_tokens=api_params["max_tokens"]
+        )
+        
+        # 使用带重试的 API 调用
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ]
+        
+        response = await call_ai_with_retry(
+            client=client,
+            model=api_params["model"],
+            messages=messages,
+            temperature=api_params["temperature"],
+            max_tokens=api_params["max_tokens"],
+            max_retries=3,
+            retry_delay=2.0,
+            disable_tools=True
+        )
+        
+        elapsed_time = time.time() - start_time
+        
+        # ========== 5. Agent 响应：AI 返回结果 ==========
+        message = response.choices[0].message
+        content = message.content if message.content else ""
+        usage = response.usage if hasattr(response, 'usage') else None
+        
+        # 详细打印响应信息
+        log_ai_response(
+            endpoint_name="v3_node_detail",
+            response_content=content,
+            usage=usage,
+            show_full_response=True
+        )
+        
+        print(f"⏱️  请求耗时: {elapsed_time:.2f}秒")
+        
+        # ========== 6. System 动作：解析响应 ==========
+        print("\n[System] 🔍 解析 AI 响应")
+        original_content = content
+        
+        # 使用专门的节点详情 JSON 解析函数（更强的容错性）
+        detail_data = parse_node_detail_json(content)
+        
+        if detail_data is None:
+            print(f"\n[System] ❌ JSON 解析完全失败")
+            print(f"   └─ 原始内容长度: {len(original_content)} 字符")
+            print(f"   └─ 原始内容预览:\n{original_content[:500]}...")
+            raise HTTPException(
+                status_code=500,
+                detail=f"无法解析 AI 返回的 JSON。请重试。"
+            )
+        
+        print(f"   └─ JSON 解析成功")
+        
+        # 验证和补充必要字段
+        if "title" not in detail_data:
+            detail_data["title"] = request.node_label
+        if "definition" not in detail_data:
+            detail_data["definition"] = "暂无定义"
+        if "analogy" not in detail_data:
+            detail_data["analogy"] = None
+        if "importance" not in detail_data:
+            detail_data["importance"] = "暂无说明"
+        if "action_item" not in detail_data:
+            detail_data["action_item"] = "暂无建议"
+        if "resource_keywords" not in detail_data:
+            detail_data["resource_keywords"] = []
+        
+        # ========== 7. System 动作：返回结果 ==========
+        print("\n[System] 📤 返回处理结果")
+        print(f"   └─ Title: {detail_data.get('title', 'N/A')}")
+        print(f"   └─ Definition: {detail_data.get('definition', 'N/A')[:50]}...")
+        print(f"   └─ Analogy: {detail_data.get('analogy', 'N/A')[:50] if detail_data.get('analogy') else '无'}")
+        print(f"   └─ Importance: {detail_data.get('importance', 'N/A')[:50]}...")
+        print(f"   └─ Action Item: {detail_data.get('action_item', 'N/A')[:50]}...")
+        print(f"   └─ Resource Keywords: {len(detail_data.get('resource_keywords', []))} 个")
+        
+        print(f"\n[System] ✅ 请求处理完成 (总耗时: {elapsed_time:.2f}秒)")
+        print("="*80 + "\n")
+        
+        return {
+            "success": True,
+            "data": detail_data
+        }
+    except Exception as e:
+        print(f"\n[System] ❌ 错误: {str(e)}")
+        import traceback
+        print(f"   └─ 错误详情:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"获取节点详情失败: {str(e)}")
+
+
+@app.post("/api/v3/chat")
+async def v3_chat(request: V3ChatRequest):
+    """
+    v3 版本：节点相关的聊天问答
+    基于节点信息和用户背景，回答用户关于该节点的问题
+    """
+    print("\n" + "="*80)
+    print("💬 LinkLog v3 - 节点聊天问答")
+    print("="*80)
+    
+    # ========== 1. Agent 动作：接收聊天请求 ==========
+    print("\n[Agent] 📥 接收聊天请求")
+    print(f"   └─ Goal: {request.goal}")
+    print(f"   └─ Context: {request.context or '无'}")
+    print(f"   └─ Node: {request.node_label}")
+    print(f"   └─ Question: {request.question}")
+    
+    # ========== 2. System 动作：构建 Prompt ==========
+    print("\n[System] 🔧 构建 AI Prompt (Chat)")
+    
+    system_prompt = """你是一位友好的技术导师助手。用户正在学习一个知识图谱中的节点概念，你需要基于节点信息和用户背景，耐心、清晰地回答他们的问题。
+必须使用简体中文回答。"""
+    
+    # 构建上下文信息
+    context_info = f"""
+**学习目标：** {request.goal}
+**当前节点：** {request.node_label}
+"""
+    if request.context:
+        context_info += f"**用户背景知识：** {request.context}\n"
+    
+    # 构建对话历史（如果有）
+    conversation_context = ""
+    if request.conversation_history and len(request.conversation_history) > 0:
+        conversation_context = "\n**之前的对话：**\n"
+        for msg in request.conversation_history[-4:]:  # 只保留最近 4 轮对话
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            conversation_context += f"- {role}: {content}\n"
+    
+    user_prompt = f"""{context_info}
+{conversation_context}
+**用户当前问题：** {request.question}
+
+请基于以上信息，用简洁、易懂的中文回答用户的问题。如果问题与当前节点相关，请结合节点概念进行解释；如果问题超出节点范围，可以适当扩展，但始终要回到学习目标上。"""
+    
+    try:
+        # ========== 3. System 动作：准备 API 调用 ==========
+        print("\n[System] 🔧 准备 AI API 调用")
+        api_params = {
+            "model": "grok-4-fast",
+            "temperature": 0.7,
+            "max_tokens": 1000
+        }
+        print(f"   └─ 模型: {api_params['model']}")
+        print(f"   └─ 温度: {api_params['temperature']}")
+        print(f"   └─ 最大Token: {api_params['max_tokens']}")
+        
+        # ========== 4. System 动作：调用 AI ==========
+        import time
+        start_time = time.time()
+        
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": user_prompt
+            }
+        ]
+        
+        response = await call_ai_with_retry(
+            client=client,
+            model=api_params["model"],
+            messages=messages,
+            temperature=api_params["temperature"],
+            max_tokens=api_params["max_tokens"],
+            max_retries=3,
+            retry_delay=2.0,
+            disable_tools=True
+        )
+        
+        elapsed_time = time.time() - start_time
+        
+        # ========== 5. Agent 响应：AI 返回结果 ==========
+        message = response.choices[0].message
+        content = message.content if message.content else ""
+        usage = response.usage if hasattr(response, 'usage') else None
+        
+        print(f"⏱️  请求耗时: {elapsed_time:.2f}秒")
+        print(f"   └─ 回答长度: {len(content)} 字符")
+        
+        # ========== 6. System 动作：返回结果 ==========
+        print(f"\n[System] ✅ 请求处理完成 (总耗时: {elapsed_time:.2f}秒)")
+        print("="*80 + "\n")
+        
+        return {
+            "success": True,
+            "data": {
+                "answer": content
+            }
+        }
+    except Exception as e:
+        print(f"\n[System] ❌ 错误: {str(e)}")
+        import traceback
+        print(f"   └─ 错误详情:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"聊天请求失败: {str(e)}")
+
+
+@app.post("/api/v3/integrate-node")
+async def v3_integrate_node(request: V3IntegrateNodeRequest):
+    """
+    v3 版本：关联新概念到现有图谱
+    当用户发现新的概念时，将其关联到现有图谱中，找到 1-2 个最直接的关联节点
+    """
+    print("\n" + "="*80)
+    print("🔗 LinkLog v3 - 关联新概念到图谱")
+    print("="*80)
+    
+    # ========== 1. Agent 动作：接收请求 ==========
+    print("\n[Agent] 📥 接收关联新概念请求")
+    print(f"   └─ Goal: {request.goal}")
+    print(f"   └─ Context: {request.context or '无'}")
+    print(f"   └─ New Concept: {request.new_concept}")
+    print(f"   └─ Existing Nodes: {len(request.existing_nodes)} 个节点")
+    
+    # ========== 2. System 动作：构建 Prompt ==========
+    print("\n[System] 🔧 构建 AI Prompt (Integrate Node)")
+    
+    # 构建现有节点信息
+    existing_nodes_info = "\n".join([
+        f"- {node.get('label', '')} (id: {node.get('id', '')}, type: {node.get('category', node.get('type', 'unknown'))}, level: {node.get('level', 'N/A')})"
+        for node in request.existing_nodes
+    ])
+    
+    system_prompt = """你是一位知识图谱架构师。用户正在学习一个知识图谱，现在发现了一个新的概念，需要你帮助将这个新概念关联到现有图谱中。
+
+**重要规则：**
+1. 分析新概念与现有节点的关系，找出 1-2 个最直接的关联节点（避免连线太乱）
+2. **判断新概念是否为已知知识**：
+   - 如果用户提供了 context（背景知识），且新概念明显属于用户已知的知识范畴，应该标记为 type: "known"
+   - 例如：如果 context 提到 "npm"，而新概念是 "npm包管理" 或相关概念，应该标记为 "known"
+3. 确定新概念的节点类型（target, concept, prerequisite, bridge, new_concept, review, known 之一）
+4. 确定新概念的层级（level: 0=目标, 1=核心支柱, 2=基础依赖, 3=已知基石）
+   - 如果 type 是 "known"，level 应该设置为 3
+5. 生成新节点的描述，说明它为什么重要，以及它与目标的关系
+6. 生成连接关系（edges），说明新概念如何连接到现有节点
+7. **所有输出必须使用简体中文**
+
+**输出格式（严格 JSON）：**
+{
+  "node": {
+    "id": "新节点的唯一ID（如果是 known 类型则使用 known_xxx 格式，否则使用 new_concept_xxx 格式）",
+    "label": "新概念的简短名称（3-5个字）",
+    "type": "节点类型（如果是用户已知知识，必须是 'known'）",
+    "level": "节点层级（数字，known 类型必须是 3）",
+    "description": "简短描述（1句话，说明它是什么，为什么重要）"
+  },
+  "edges": [
+    {
+      "source": "新节点ID",
+      "target": "现有节点ID",
+      "label": "关系说明（如：依赖、支持、扩展等）"
+    }
+  ]
+}
+
+**注意：**
+- edges 数组最多包含 2 个连接，选择最直接、最重要的关联
+- 确保新节点与目标节点有清晰的逻辑路径
+- **如果新概念属于用户已知知识（在 context 中提到或相关），必须设置 type: "known", level: 3**"""
+    
+    user_prompt = f"""**学习目标：** {request.goal}
+{f'**用户背景知识：** {request.context}' if request.context else ''}
+
+**新发现的概念：** {request.new_concept}
+
+**现有图谱节点：**
+{existing_nodes_info}
+
+**任务：**
+请分析 "{request.new_concept}" 这个新概念，确定：
+1. **它是否属于用户已知知识？** 如果用户提供了 context，且新概念明显属于用户已知的知识范畴，必须标记为 type: "known", level: 3
+2. 如果不是已知知识，它应该是什么类型的节点？（target, concept, prerequisite, bridge, new_concept, review）
+3. 它应该处于哪个层级？（0=目标, 1=核心支柱, 2=基础依赖, 3=已知基石）
+4. 它应该连接到哪些现有节点（选择 1-2 个最直接的关联）？
+5. 它与目标 "{request.goal}" 的关系是什么？
+
+请严格按照 JSON 格式输出，不要添加任何额外的解释文字。"""
+    
+    print(f"   └─ System Prompt 长度: {len(system_prompt)} 字符")
+    print(f"   └─ User Prompt 长度: {len(user_prompt)} 字符")
+    
+    try:
+        # ========== 3. System 动作：调用 AI ==========
+        print("\n[System] 🤖 调用 AI API")
+        api_params = {
+            "model": "grok-4-fast",
+            "temperature": 0.3,
+            "max_tokens": 1000
+        }
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        response = await call_ai_with_retry(
+            client=client,
+            model=api_params["model"],
+            messages=messages,
+            temperature=api_params["temperature"],
+            max_tokens=api_params["max_tokens"],
+            max_retries=3,
+            retry_delay=2.0,
+            disable_tools=True
+        )
+        
+        ai_response = response.choices[0].message.content
+        print(f"   └─ AI 响应长度: {len(ai_response)} 字符")
+        
+        # ========== 4. System 动作：解析 JSON ==========
+        print("\n[System] 🔍 解析 AI 响应")
+        result = parse_json_with_fallback(ai_response)
+        
+        # 验证返回结构
+        if "node" not in result or "edges" not in result:
+            raise ValueError("AI 返回的 JSON 缺少必要字段：node 或 edges")
+        
+        node = result["node"]
+        edges = result["edges"]
+        
+        # 验证节点字段
+        required_node_fields = ["id", "label", "type", "level", "description"]
+        for field in required_node_fields:
+            if field not in node:
+                raise ValueError(f"节点缺少必要字段: {field}")
+        
+        # 验证边的数量（最多 2 个）
+        if len(edges) > 2:
+            print(f"   ⚠️  警告：AI 返回了 {len(edges)} 个连接，将只保留前 2 个")
+            edges = edges[:2]
+        
+        # 验证边的结构
+        for edge in edges:
+            if "source" not in edge or "target" not in edge:
+                raise ValueError("边缺少必要字段：source 或 target")
+        
+        print(f"   └─ 新节点: {node['label']} (id: {node['id']}, type: {node['type']}, level: {node['level']})")
+        print(f"   └─ 连接数: {len(edges)}")
+        for i, edge in enumerate(edges, 1):
+            print(f"      {i}. {edge['source']} -> {edge['target']}")
+        
+        # ========== 5. Agent 动作：返回结果 ==========
+        print("\n[Agent] ✅ 返回关联结果")
+        print("="*80 + "\n")
+        return {
+            "success": True,
+            "data": {
+                "node": node,
+                "edges": edges
+            }
+        }
+        
+    except Exception as e:
+        import traceback
+        print(f"\n❌ 关联新概念失败: {str(e)}")
+        print(f"   └─ 错误详情:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"关联新概念失败: {str(e)}")
 
 
 @app.post("/api/search")

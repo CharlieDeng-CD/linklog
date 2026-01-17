@@ -59,4 +59,13 @@ htmlcov/
 *.tmp
 *.bak
 *.cache
+*.pid
+
+# Next.js
+frontend/.next/
+frontend/out/
+frontend/node_modules/
+
+# 部署相关
+deploy-config.json
 

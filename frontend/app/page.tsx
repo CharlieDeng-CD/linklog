@@ -6,20 +6,29 @@ import GraphCanvas from '@/components/GraphCanvas';
 
 export default function Home() {
   const [goal, setGoal] = useState<string | null>(null);
+  const [context, setContext] = useState<string | undefined>(undefined);
   const [initialNodes, setInitialNodes] = useState<any[]>([]);
   const [initialEdges, setInitialEdges] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
 
-  const handleGoalSubmit = async (userGoal: string) => {
+  const handleGoalSubmit = async (userGoal: string, userContext?: string) => {
     setGoal(userGoal);
+    setContext(userContext);
+    setLoading(true);
     
-    // 调用后端 API 生成初始图谱
+    // 调用后端 v3 API 生成初始图谱
     try {
-      const response = await fetch('/api/v2/init', {
+      const requestBody: { goal: string; context?: string } = { goal: userGoal };
+      if (userContext) {
+        requestBody.context = userContext;
+      }
+      
+      const response = await fetch('/api/v3/init', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ goal: userGoal }),
+        body: JSON.stringify(requestBody),
       });
       
       // 检查响应状态
@@ -27,6 +36,7 @@ export default function Home() {
         const errorText = await response.text();
         console.error('API 错误:', response.status, errorText);
         alert(`生成图谱失败: ${response.status} ${errorText.substring(0, 100)}`);
+        setLoading(false);
         return;
       }
       
@@ -36,6 +46,7 @@ export default function Home() {
         const text = await response.text();
         console.error('响应不是 JSON:', contentType, text.substring(0, 200));
         alert('服务器返回了非 JSON 格式的响应');
+        setLoading(false);
         return;
       }
       
@@ -54,6 +65,8 @@ export default function Home() {
       } else {
         alert('生成图谱失败: ' + (error instanceof Error ? error.message : '未知错误'));
       }
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -64,6 +77,7 @@ export default function Home() {
   return (
     <GraphCanvas
       originalGoal={goal}
+      userContext={context}
       initialNodes={initialNodes}
       initialEdges={initialEdges}
     />

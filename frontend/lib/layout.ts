@@ -1,10 +1,23 @@
 import dagre from 'dagre';
 import { Node, Edge } from 'reactflow';
 
-export function getLayoutedElements(nodes: Node[], edges: Edge[]) {
+export type LayoutDirection = 'TB' | 'LR'; // Top to Bottom | Left to Right
+
+export function getLayoutedElements(
+  nodes: Node[], 
+  edges: Edge[], 
+  direction: LayoutDirection = 'TB'
+) {
   const dagreGraph = new dagre.graphlib.Graph();
   dagreGraph.setDefaultEdgeLabel(() => ({}));
-  dagreGraph.setGraph({ rankdir: 'TB', nodesep: 100, ranksep: 150 });
+  
+  // 根据方向设置布局参数
+  const layoutConfig = {
+    rankdir: direction,
+    nodesep: direction === 'TB' ? 100 : 150,  // 节点间距
+    ranksep: direction === 'TB' ? 150 : 100,  // 层级间距
+  };
+  dagreGraph.setGraph(layoutConfig);
 
   nodes.forEach((node) => {
     dagreGraph.setNode(node.id, { width: 150, height: 60 });
