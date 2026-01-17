@@ -1,7 +1,7 @@
 {
   "repo_url": "https://github.com/CharlieDeng-CD/linklog",
   "service_name": "linklog",
-  "branch": "v2",
+  "branch": "v3",
   "port": 8000,
   "env_vars": {}
 }
