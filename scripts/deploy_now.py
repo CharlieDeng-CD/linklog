@@ -19,11 +19,20 @@ headers = {
     'Content-Type': 'application/json'
 }
 
+# 读取部署配置
+config_path = os.path.join(os.path.dirname(__file__), '..', 'deploy-config.json')
+try:
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    branch = config.get('branch', 'v3')
+except:
+    branch = 'v3'
+
 # 部署请求数据
 payload = {
     'repo_url': 'https://github.com/CharlieDeng-CD/linklog',
     'service_name': 'linklog',
-    'branch': 'main',  # 先尝试 main，如果失败再试 master
+    'branch': branch,
     'port': 8000
 }
 
