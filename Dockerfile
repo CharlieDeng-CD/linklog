@@ -13,6 +13,13 @@ ENV NEXT_PRIVATE_STANDALONE=true
 # 增加 Node.js 内存限制以避免构建失败
 ENV NODE_OPTIONS=--max-old-space-size=2048
 
+# 接收构建时的环境变量（用于 PostHog 等）
+# AI Builder 平台会在构建时传递这些变量
+ARG NEXT_PUBLIC_POSTHOG_KEY
+ARG NEXT_PUBLIC_POSTHOG_HOST
+ENV NEXT_PUBLIC_POSTHOG_KEY=${NEXT_PUBLIC_POSTHOG_KEY}
+ENV NEXT_PUBLIC_POSTHOG_HOST=${NEXT_PUBLIC_POSTHOG_HOST}
+
 # 复制前端依赖文件
 COPY frontend/package*.json ./
 
