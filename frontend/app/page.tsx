@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import InputScreen from '@/components/InputScreen';
 import GraphCanvas from '@/components/GraphCanvas';
+import { saveGraphToCache } from '@/lib/storage';
 
 export default function Home() {
   const [goal, setGoal] = useState<string | null>(null);
@@ -53,8 +54,18 @@ export default function Home() {
       const result = await response.json();
       
       if (result.success) {
-        setInitialNodes(result.data.nodes || []);
-        setInitialEdges(result.data.edges || []);
+        const nodes = result.data.nodes || [];
+        const edges = result.data.edges || [];
+        setInitialNodes(nodes);
+        setInitialEdges(edges);
+        
+        // 保存到本地缓存
+        saveGraphToCache({
+          goal: userGoal,
+          context: userContext,
+          nodes,
+          edges,
+        });
       } else {
         alert('生成图谱失败: ' + (result.error || '未知错误'));
       }
@@ -70,8 +81,16 @@ export default function Home() {
     }
   };
 
+  // 从缓存加载图谱
+  const handleLoadFromCache = (cachedGoal: string, cachedContext: string | undefined, cachedNodes: any[], cachedEdges: any[]) => {
+    setGoal(cachedGoal);
+    setContext(cachedContext);
+    setInitialNodes(cachedNodes);
+    setInitialEdges(cachedEdges);
+  };
+
   if (!goal || initialNodes.length === 0) {
-    return <InputScreen onSubmit={handleGoalSubmit} />;
+    return <InputScreen onSubmit={handleGoalSubmit} onLoadFromCache={handleLoadFromCache} />;
   }
 
   return (
@@ -80,6 +99,7 @@ export default function Home() {
       userContext={context}
       initialNodes={initialNodes}
       initialEdges={initialEdges}
+      onSwitchGraph={handleLoadFromCache}
     />
   );
 }

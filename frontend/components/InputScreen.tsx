@@ -1,17 +1,41 @@
 'use client';
 
-import { useState } from 'react';
-import { Sparkles } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Sparkles, History, X, Trash2 } from 'lucide-react';
+import { getCachedGraphs, deleteGraphFromCache, GraphCache } from '@/lib/storage';
 
 interface InputScreenProps {
   onSubmit: (goal: string, context?: string) => void;
+  onLoadFromCache: (goal: string, context: string | undefined, nodes: any[], edges: any[]) => void;
 }
 
-export default function InputScreen({ onSubmit }: InputScreenProps) {
+export default function InputScreen({ onSubmit, onLoadFromCache }: InputScreenProps) {
   const [goal, setGoal] = useState('');
   const [context, setContext] = useState('');
   const [showContext, setShowContext] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [cachedGraphs, setCachedGraphs] = useState<GraphCache[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+
+  // 加载缓存的图谱列表
+  useEffect(() => {
+    const graphs = getCachedGraphs();
+    setCachedGraphs(graphs);
+  }, []);
+
+  // 从缓存加载图谱
+  const handleLoadGraph = (graph: GraphCache) => {
+    onLoadFromCache(graph.goal, graph.context, graph.nodes, graph.edges);
+  };
+
+  // 删除缓存图谱
+  const handleDeleteGraph = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation(); // 阻止触发加载
+    if (confirm('确定要删除这个图谱吗？')) {
+      deleteGraphFromCache(id);
+      setCachedGraphs(getCachedGraphs());
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -26,13 +50,83 @@ export default function InputScreen({ onSubmit }: InputScreenProps) {
 
   return (
     <div className="fluid-gradient min-h-screen flex items-center justify-center p-4">
-      <div className="glass rounded-2xl shadow-2xl p-12 max-w-2xl w-full">
+      <div className="glass rounded-2xl shadow-2xl p-12 max-w-2xl w-full relative">
+        {/* 历史记录按钮 - 始终显示 */}
+        <button
+          type="button"
+          onClick={() => setShowHistory(!showHistory)}
+          className="absolute top-4 right-4 p-2 glass bg-white/10 hover:bg-white/20 border border-white/20 rounded-lg text-white transition-all flex items-center gap-2"
+          title="查看历史记录"
+        >
+          <History size={18} />
+          {cachedGraphs.length > 0 && (
+            <span className="text-sm">{cachedGraphs.length}</span>
+          )}
+        </button>
+
         <h1 className="text-4xl font-bold text-white mb-2 text-center">
           Map Your Unknowns
         </h1>
         <p className="text-white/80 text-center mb-8">
           输入你的学习目标，让我们帮你识别前置知识
         </p>
+
+        {/* 历史记录面板 */}
+        {showHistory && (
+          <div className="mb-6 glass bg-white/5 border border-white/10 rounded-xl p-4 max-h-64 overflow-y-auto">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-white font-semibold flex items-center gap-2">
+                <History size={16} />
+                最近查看 {cachedGraphs.length > 0 && `(${cachedGraphs.length})`}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowHistory(false)}
+                className="text-white/60 hover:text-white transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            {cachedGraphs.length > 0 ? (
+              <div className="space-y-2">
+                {cachedGraphs.map((graph) => (
+                  <div
+                    key={graph.id}
+                    onClick={() => handleLoadGraph(graph)}
+                    className="p-3 glass bg-white/10 hover:bg-white/15 border border-white/20 rounded-lg cursor-pointer transition-all group"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-white font-medium truncate">{graph.goal}</p>
+                        {graph.context && (
+                          <p className="text-white/60 text-xs mt-1 truncate">
+                            背景: {graph.context}
+                          </p>
+                        )}
+                        <p className="text-white/40 text-xs mt-1">
+                          {new Date(graph.updatedAt).toLocaleString('zh-CN')}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => handleDeleteGraph(e, graph.id)}
+                        className="ml-2 p-1 text-white/40 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100"
+                        title="删除"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-8">
+                <p className="text-white/60 text-sm">暂无历史记录</p>
+                <p className="text-white/40 text-xs mt-2">生成图谱后会自动保存到这里</p>
+              </div>
+            )}
+          </div>
+        )}
         
         <form onSubmit={handleSubmit} className="space-y-4">
           {/* 主输入框：学习目标 */}

@@ -21,12 +21,18 @@ import asyncio
 import time
 
 # 加载环境变量
-env_path = Path(__file__).parent.parent / '.env'
-load_dotenv(env_path)
+try:
+    env_path = Path(__file__).parent.parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+    else:
+        load_dotenv() # 尝试加载当前目录的 .env
+except Exception as e:
+    print(f"⚠️ 无法加载 .env 文件: {e}")
 
 # 版本信息
 VERSION = os.getenv("VERSION", "v2.0.0")
-PORT = int(os.getenv("PORT", "8000"))  # 统一使用 8000，与 Dockerfile 一致
+PORT = int(os.getenv("PORT", "8003"))  # 改回 8003，匹配前端代理
 
 app = FastAPI(
     title="LinkLog API",

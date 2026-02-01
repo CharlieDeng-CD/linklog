@@ -17,13 +17,16 @@ import CustomNode from './CustomNode';
 import V3ContextSidebar from './V3ContextSidebar';
 import ColorLegend from './ColorLegend';
 import { getLayoutedElements, LayoutDirection } from '@/lib/layout';
-import { ArrowDown, ArrowRight, RotateCw, Layout, Link2, X } from 'lucide-react';
+import { convertToMermaid } from '@/lib/mermaid';
+import { getCachedGraphs, deleteGraphFromCache, GraphCache } from '@/lib/storage';
+import { ArrowDown, ArrowRight, RotateCw, Layout, Link2, X, Code, Copy, Check, History, Trash2 } from 'lucide-react';
 
 interface GraphCanvasProps {
   originalGoal: string;
   userContext?: string;  // v3: 用户背景知识（可选）
   initialNodes: any[];
   initialEdges: any[];
+  onSwitchGraph?: (goal: string, context: string | undefined, nodes: any[], edges: any[]) => void; // 切换图谱的回调
 }
 
 const nodeTypes = {
@@ -35,6 +38,7 @@ export default function GraphCanvas({
   userContext,
   initialNodes,
   initialEdges,
+  onSwitchGraph,
 }: GraphCanvasProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
@@ -56,6 +60,40 @@ export default function GraphCanvas({
   const [showIntegrateModal, setShowIntegrateModal] = useState(false);
   const [newConceptInput, setNewConceptInput] = useState('');
   const [integrating, setIntegrating] = useState(false);
+  // Mermaid 导出 Modal 状态
+  const [showMermaidModal, setShowMermaidModal] = useState(false);
+  const [mermaidCode, setMermaidCode] = useState('');
+  const [copied, setCopied] = useState(false);
+  // 历史记录状态
+  const [showHistory, setShowHistory] = useState(false);
+  const [cachedGraphs, setCachedGraphs] = useState<GraphCache[]>([]);
+
+  // 加载缓存的图谱列表
+  useEffect(() => {
+    const graphs = getCachedGraphs();
+    // 过滤掉当前图谱
+    const filtered = graphs.filter(g => !(g.goal === originalGoal && g.context === userContext));
+    setCachedGraphs(filtered);
+  }, [originalGoal, userContext]);
+
+  // 切换图谱
+  const handleSwitchGraph = useCallback((graph: GraphCache) => {
+    if (onSwitchGraph) {
+      onSwitchGraph(graph.goal, graph.context, graph.nodes, graph.edges);
+      setShowHistory(false);
+    }
+  }, [onSwitchGraph]);
+
+  // 删除缓存图谱
+  const handleDeleteGraph = useCallback((e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    if (confirm('确定要删除这个图谱吗？')) {
+      deleteGraphFromCache(id);
+      const graphs = getCachedGraphs();
+      const filtered = graphs.filter(g => !(g.goal === originalGoal && g.context === userContext));
+      setCachedGraphs(filtered);
+    }
+  }, [originalGoal, userContext]);
 
   // 使用 ref 存储回调函数，避免循环依赖
   const handleExpandButtonRef = useRef<((node: Node) => Promise<void>) | null>(null);
@@ -577,6 +615,21 @@ export default function GraphCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes, edges, layoutDirection, enrichNodesWithCallbacks]);
 
+  // 处理导出 Mermaid
+  const handleExportMermaid = useCallback(() => {
+    const code = convertToMermaid(nodes, edges, layoutDirection);
+    setMermaidCode(code);
+    setShowMermaidModal(true);
+    setCopied(false);
+  }, [nodes, edges, layoutDirection]);
+
+  // 复制代码到剪贴板
+  const copyToClipboard = useCallback(() => {
+    navigator.clipboard.writeText(mermaidCode);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [mermaidCode]);
+
   return (
     <div className="fluid-gradient min-h-screen h-screen relative flex flex-col">
       {/* 功能栏：固定在顶部 */}
@@ -616,8 +669,136 @@ export default function GraphCanvas({
             <Link2 size={18} />
             <span className="text-sm">关联新概念</span>
           </button>
+
+          {/* 导出 Mermaid 按钮 */}
+          <button
+            onClick={handleExportMermaid}
+            className="glass bg-white/10 hover:bg-white/20 backdrop-blur-sm border border-white/20 rounded-lg px-4 py-2 shadow-md hover:shadow-lg transition-all flex items-center gap-2 text-white"
+            title="导出为 Mermaid 代码"
+          >
+            <Code size={18} />
+            <span className="text-sm">导出 Mermaid</span>
+          </button>
+
+          {/* 历史记录按钮 */}
+          {onSwitchGraph && (
+            <button
+              onClick={() => setShowHistory(!showHistory)}
+              className="glass bg-white/10 hover:bg-white/20 backdrop-blur-sm border border-white/20 rounded-lg px-4 py-2 shadow-md hover:shadow-lg transition-all flex items-center gap-2 text-white"
+              title="切换其他图谱"
+            >
+              <History size={18} />
+              <span className="text-sm">
+                历史记录 {cachedGraphs.length > 0 && `(${cachedGraphs.length})`}
+              </span>
+            </button>
+          )}
         </div>
       </div>
+
+      {/* 历史记录面板 */}
+      {showHistory && onSwitchGraph && (
+        <div className="absolute top-16 right-6 z-[55] glass bg-white/10 border border-white/20 rounded-xl shadow-xl p-4 w-80 max-h-96 overflow-y-auto">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-white font-semibold flex items-center gap-2">
+              <History size={16} />
+              切换图谱 {cachedGraphs.length > 0 && `(${cachedGraphs.length})`}
+            </h3>
+            <button
+              type="button"
+              onClick={() => setShowHistory(false)}
+              className="text-white/60 hover:text-white transition-colors"
+            >
+              <X size={18} />
+            </button>
+          </div>
+          {cachedGraphs.length > 0 ? (
+            <div className="space-y-2">
+              {cachedGraphs.map((graph) => (
+                <div
+                  key={graph.id}
+                  onClick={() => handleSwitchGraph(graph)}
+                  className="p-3 glass bg-white/10 hover:bg-white/15 border border-white/20 rounded-lg cursor-pointer transition-all group"
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-white font-medium truncate">{graph.goal}</p>
+                      {graph.context && (
+                        <p className="text-white/60 text-xs mt-1 truncate">
+                          背景: {graph.context}
+                        </p>
+                      )}
+                      <p className="text-white/40 text-xs mt-1">
+                        {new Date(graph.updatedAt).toLocaleString('zh-CN')}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={(e) => handleDeleteGraph(e, graph.id)}
+                      className="ml-2 p-1 text-white/40 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100"
+                      title="删除"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-center py-8">
+              <p className="text-white/60 text-sm">暂无其他图谱</p>
+              <p className="text-white/40 text-xs mt-2">生成更多图谱后可以在这里切换</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Mermaid 导出 Modal */}
+      {showMermaidModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm">
+          <div className="glass border border-white/20 rounded-lg shadow-xl p-6 w-full max-w-2xl mx-4">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Code className="text-white" size={20} />
+                <h3 className="text-lg font-semibold text-white">导出 Mermaid 代码</h3>
+              </div>
+              <button
+                onClick={() => setShowMermaidModal(false)}
+                className="text-white/60 hover:text-white transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="relative mb-4">
+              <pre className="w-full h-64 overflow-auto p-4 glass bg-black/30 border border-white/10 rounded-lg text-white/90 font-mono text-sm whitespace-pre">
+                {mermaidCode}
+              </pre>
+              <button
+                onClick={copyToClipboard}
+                className="absolute top-3 right-3 p-2 glass bg-white/10 hover:bg-white/20 border border-white/20 rounded-md text-white transition-all flex items-center gap-2"
+                title="复制代码到剪贴板"
+              >
+                {copied ? <Check size={16} className="text-green-400" /> : <Copy size={16} />}
+                <span className="text-xs">{copied ? '已复制' : '复制'}</span>
+              </button>
+            </div>
+
+            <p className="text-sm text-white/60 mb-6">
+              你可以将此代码粘贴到支持 Mermaid 的工具中（如 Notion, Obsidian, GitHub README 等）。
+            </p>
+
+            <div className="flex justify-end">
+              <button
+                onClick={() => setShowMermaidModal(false)}
+                className="px-6 py-2 glass bg-white/10 hover:bg-white/20 border border-white/20 rounded-lg text-white transition-all"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 关联新概念 Modal */}
       {showIntegrateModal && (
