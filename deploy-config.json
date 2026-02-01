@@ -3,6 +3,9 @@
   "service_name": "linklog",
   "branch": "v3",
   "port": 8000,
-  "env_vars": {}
+  "env_vars": {
+    "NEXT_PUBLIC_POSTHOG_KEY": "phc_YAheO9KQPkqxZWCA8P8FYJgQtlQoMjVopNQH4clHv0h",
+    "NEXT_PUBLIC_POSTHOG_HOST": "https://app.posthog.com"
+  }
 }
 
