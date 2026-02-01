@@ -30,6 +30,16 @@ RUN npm ci --legacy-peer-deps
 # 复制前端源代码
 COPY frontend/ .
 
+# 构建前：从环境变量生成 .env.local（如果环境变量存在）
+# 这样 Next.js 在构建时就能读取到 NEXT_PUBLIC_* 环境变量
+RUN if [ -n "$NEXT_PUBLIC_POSTHOG_KEY" ]; then \
+      echo "NEXT_PUBLIC_POSTHOG_KEY=$NEXT_PUBLIC_POSTHOG_KEY" > .env.local && \
+      echo "NEXT_PUBLIC_POSTHOG_HOST=${NEXT_PUBLIC_POSTHOG_HOST:-https://app.posthog.com}" >> .env.local && \
+      echo "✅ 已生成 .env.local 文件（包含 PostHog 配置）"; \
+    else \
+      echo "⚠️  NEXT_PUBLIC_POSTHOG_KEY 未设置，跳过 PostHog 配置"; \
+    fi
+
 # 构建 Next.js 应用（输出静态文件）
 # 清理可能的旧构建产物
 RUN rm -rf .next out || true
