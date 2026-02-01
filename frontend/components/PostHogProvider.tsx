@@ -29,6 +29,21 @@ export function PostHogProvider({ children }: { children: React.ReactNode }) {
             person_profiles: 'identified_only',
             loaded: (posthog) => {
               console.log('✅ [PostHog] 已成功初始化');
+              
+              // 发送一个测试事件，验证连接是否正常
+              try {
+                posthog.capture('test_event', {
+                  test: true,
+                  timestamp: new Date().toISOString(),
+                });
+                console.log('✅ [PostHog] 测试事件已发送：test_event');
+              } catch (error) {
+                console.error('❌ [PostHog] 测试事件发送失败:', error);
+              }
+            },
+            // 添加错误回调
+            _onCapture: (eventName, eventData) => {
+              console.log(`[PostHog] 📤 事件发送中: ${eventName}`, eventData);
             },
           });
           console.log('✅ [PostHog] 初始化请求已发送');
