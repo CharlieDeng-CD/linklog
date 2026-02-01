@@ -14,18 +14,31 @@ export function PostHogProvider({ children }: { children: React.ReactNode }) {
       const posthogKey = process.env.NEXT_PUBLIC_POSTHOG_KEY;
       const posthogHost = process.env.NEXT_PUBLIC_POSTHOG_HOST || 'https://app.posthog.com';
 
+      // 调试信息：显示环境变量状态（生产环境也显示）
+      console.log('[PostHog] 初始化检查:', {
+        hasKey: !!posthogKey,
+        keyPrefix: posthogKey ? posthogKey.substring(0, 10) + '...' : 'undefined',
+        host: posthogHost,
+        nodeEnv: process.env.NODE_ENV,
+      });
+
       if (posthogKey) {
-        posthog.init(posthogKey, {
-          api_host: posthogHost,
-          person_profiles: 'identified_only', // 或 'always' 如果你想要所有用户都有 profile
-          loaded: (posthog) => {
-            if (process.env.NODE_ENV === 'development') {
-              console.log('✅ PostHog 已初始化');
-            }
-          },
-        });
+        try {
+          posthog.init(posthogKey, {
+            api_host: posthogHost,
+            person_profiles: 'identified_only',
+            loaded: (posthog) => {
+              console.log('✅ [PostHog] 已成功初始化');
+            },
+            _capture_metrics: true, // 启用指标捕获
+          });
+          console.log('✅ [PostHog] 初始化请求已发送');
+        } catch (error) {
+          console.error('❌ [PostHog] 初始化失败:', error);
+        }
       } else {
-        console.warn('⚠️ PostHOG_KEY 未设置，PostHog 未初始化');
+        console.warn('⚠️ [PostHog] NEXT_PUBLIC_POSTHOG_KEY 未设置，PostHog 未初始化');
+        console.warn('⚠️ [PostHog] 这通常意味着环境变量在构建时没有被正确传递');
       }
     }
   }, []);
