@@ -44,14 +44,29 @@ export function PostHogProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     // 页面浏览追踪
-    if (pathname && typeof window !== 'undefined' && posthog.__loaded) {
-      let url = window.origin + pathname;
-      if (searchParams && searchParams.toString()) {
-        url = url + `?${searchParams.toString()}`;
-      }
-      posthog.capture('$pageview', {
-        $current_url: url,
-      });
+    if (pathname && typeof window !== 'undefined') {
+      // 等待 PostHog 加载完成
+      const checkAndTrack = () => {
+        if (posthog.__loaded) {
+          let url = window.origin + pathname;
+          if (searchParams && searchParams.toString()) {
+            url = url + `?${searchParams.toString()}`;
+          }
+          try {
+            posthog.capture('$pageview', {
+              $current_url: url,
+            });
+            console.log('[PostHog] ✅ 页面浏览已追踪:', url);
+          } catch (error) {
+            console.error('[PostHog] ❌ 页面浏览追踪失败:', error);
+          }
+        } else {
+          // 如果还没加载，等待一下再试
+          setTimeout(checkAndTrack, 100);
+        }
+      };
+      
+      checkAndTrack();
     }
   }, [pathname, searchParams]);
 
