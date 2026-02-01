@@ -30,7 +30,6 @@ export function PostHogProvider({ children }: { children: React.ReactNode }) {
             loaded: (posthog) => {
               console.log('✅ [PostHog] 已成功初始化');
             },
-            _capture_metrics: true, // 启用指标捕获
           });
           console.log('✅ [PostHog] 初始化请求已发送');
         } catch (error) {
