@@ -4,6 +4,7 @@ import { useState } from 'react';
 import InputScreen from '@/components/InputScreen';
 import GraphCanvas from '@/components/GraphCanvas';
 import { saveGraphToCache } from '@/lib/storage';
+import { trackGraphGenerated } from '@/lib/analytics';
 
 export default function Home() {
   const [goal, setGoal] = useState<string | null>(null);
@@ -66,6 +67,10 @@ export default function Home() {
           nodes,
           edges,
         });
+        
+        // 追踪事件
+        const mode = userContext ? 'Mode B' : 'Mode A';
+        trackGraphGenerated(userGoal, !!userContext, mode, nodes.length, edges.length);
       } else {
         alert('生成图谱失败: ' + (result.error || '未知错误'));
       }

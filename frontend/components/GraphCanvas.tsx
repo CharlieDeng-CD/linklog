@@ -19,6 +19,7 @@ import ColorLegend from './ColorLegend';
 import { getLayoutedElements, LayoutDirection } from '@/lib/layout';
 import { convertToMermaid } from '@/lib/mermaid';
 import { getCachedGraphs, deleteGraphFromCache, GraphCache } from '@/lib/storage';
+import { trackMermaidExported, trackGraphSwitched, trackConceptIntegrated, trackNodeExpanded, trackNodeDetailViewed } from '@/lib/analytics';
 import { ArrowDown, ArrowRight, RotateCw, Layout, Link2, X, Code, Copy, Check, History, Trash2 } from 'lucide-react';
 
 interface GraphCanvasProps {
@@ -81,6 +82,9 @@ export default function GraphCanvas({
     if (onSwitchGraph) {
       onSwitchGraph(graph.goal, graph.context, graph.nodes, graph.edges);
       setShowHistory(false);
+      
+      // 追踪事件
+      trackGraphSwitched(graph.goal);
     }
   }, [onSwitchGraph]);
 
@@ -357,6 +361,9 @@ export default function GraphCanvas({
             const enrichedNodes = enrichNodesWithCallbacks(layoutedNodes);
             setNodes(enrichedNodes);
             setEdges(layoutedEdges);
+            
+            // 追踪事件
+            trackNodeExpanded(node.data.label, node.data.category || 'unknown', newNodes.length);
           }
         } catch (error) {
           console.error('展开节点失败:', error);
@@ -389,6 +396,9 @@ export default function GraphCanvas({
     (node: Node) => {
       setSelectedNode(node);
       setSidebarOpen(true);
+      
+      // 追踪事件
+      trackNodeDetailViewed(node.data.label);
     },
     []
   );
@@ -585,6 +595,9 @@ export default function GraphCanvas({
       // 关闭 Modal 并清空输入
       setShowIntegrateModal(false);
       setNewConceptInput('');
+      
+      // 追踪事件
+      trackConceptIntegrated(newConceptInput.trim());
     } catch (error) {
       console.error('关联新概念失败:', error);
       const errorMessage = error instanceof Error ? error.message : '未知错误';
@@ -621,6 +634,9 @@ export default function GraphCanvas({
     setMermaidCode(code);
     setShowMermaidModal(true);
     setCopied(false);
+    
+    // 追踪事件
+    trackMermaidExported(nodes.length, edges.length);
   }, [nodes, edges, layoutDirection]);
 
   // 复制代码到剪贴板
